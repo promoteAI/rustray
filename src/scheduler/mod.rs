@@ -69,6 +69,18 @@ pub struct GlobalScheduler {
     
     // 任务队列（按优先级）
     task_queues: Arc<RwLock<HashMap<TaskPriority, Vec<TaskSpec>>>>,
+    
+    // 工作流管理
+    workflows: Arc<RwLock<HashMap<String, Workflow>>>,
+    
+    // 任务缓存
+    task_cache: Arc<RwLock<HashMap<String, TaskCache>>>,
+    
+    // 资源预测器
+    resource_predictor: Arc<ResourcePredictor>,
+    
+    // 可插拔调度策略
+    scheduling_strategy: Arc<Box<dyn SchedulingStrategy>>,
 }
 
 #[derive(Debug, Clone)]
@@ -97,6 +109,73 @@ struct SchedulerStats {
     resource_utilization: HashMap<String, f64>,
 }
 
+// 工作流相关结构
+#[derive(Debug, Clone)]
+pub struct Workflow {
+    pub id: String,
+    pub name: String,
+    pub tasks: Vec<WorkflowTask>,
+    pub dependencies: HashMap<String, Vec<String>>,  // task_id -> [dependent_task_ids]
+    pub state: WorkflowState,
+    pub created_at: Instant,
+    pub timeout: Option<Duration>,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkflowTask {
+    pub id: String,
+    pub task_spec: TaskSpec,
+    pub state: TaskState,
+    pub retry_strategy: RetryStrategy,
+    pub cache_key: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum WorkflowState {
+    Pending,
+    Running,
+    Completed,
+    Failed(String),
+    Cancelled,
+}
+
+// 重试策略
+#[derive(Debug, Clone)]
+pub struct RetryStrategy {
+    pub max_attempts: usize,
+    pub initial_delay: Duration,
+    pub max_delay: Duration,
+    pub backoff_factor: f64,
+    pub retry_on_errors: Vec<String>,
+}
+
+// 缓存相关结构
+#[derive(Debug, Clone)]
+pub struct TaskCache {
+    pub key: String,
+    pub result: TaskResult,
+    pub created_at: Instant,
+    pub ttl: Duration,
+    pub size: usize,
+}
+
+// 资源预测相关结构
+#[derive(Debug, Clone)]
+pub struct ResourcePrediction {
+    pub cpu_usage: Vec<(Instant, f64)>,
+    pub memory_usage: Vec<(Instant, usize)>,
+    pub network_usage: Vec<(Instant, (u64, u64))>,  // (rx, tx)
+    pub confidence: f64,
+}
+
+// 调度策略接口
+#[async_trait]
+pub trait SchedulingStrategy: Send + Sync {
+    async fn select_worker(&self, task: &TaskSpec, workers: &[WorkerNode]) -> Result<String>;
+    async fn should_preempt(&self, new_task: &TaskSpec, running_task: &TaskSpec) -> bool;
+    async fn calculate_priority(&self, task: &TaskSpec) -> TaskPriority;
+}
+
 impl GlobalScheduler {
     pub fn new() -> Self {
         Self::with_config(SchedulerConfig::default())
@@ -113,6 +192,10 @@ impl GlobalScheduler {
             worker_health: Arc::new(RwLock::new(HashMap::new())),
             stats: Arc::new(RwLock::new(SchedulerStats::default())),
             task_queues: Arc::new(RwLock::new(HashMap::new())),
+            workflows: Arc::new(RwLock::new(HashMap::new())),
+            task_cache: Arc::new(RwLock::new(HashMap::new())),
+            resource_predictor: Arc::new(ResourcePredictor::new()),
+            scheduling_strategy: Arc::new(Box::new(DefaultSchedulingStrategy::new())),
         };
 
         // 启动后台任务
@@ -478,6 +561,218 @@ impl GlobalScheduler {
 
         true
     }
+
+    /// 提交工作流
+    pub async fn submit_workflow(&self, workflow: Workflow) -> Result<String> {
+        let workflow_id = workflow.id.clone();
+        
+        // 验证工作流
+        self.validate_workflow(&workflow)?;
+        
+        // 存储工作流
+        self.workflows.write().await.insert(workflow_id.clone(), workflow.clone());
+        
+        // 提交就绪的任务
+        self.schedule_workflow_tasks(&workflow_id).await?;
+        
+        Ok(workflow_id)
+    }
+    
+    /// 验证工作流的正确性
+    fn validate_workflow(&self, workflow: &Workflow) -> Result<()> {
+        // 检查是否有环
+        if self.has_cycle_in_workflow(workflow) {
+            return Err(anyhow!("Workflow contains cycles"));
+        }
+        
+        // 检查所有依赖的任务是否存在
+        for (task_id, deps) in &workflow.dependencies {
+            if !workflow.tasks.iter().any(|t| t.id == *task_id) {
+                return Err(anyhow!("Task {} not found in workflow", task_id));
+            }
+            for dep_id in deps {
+                if !workflow.tasks.iter().any(|t| t.id == *dep_id) {
+                    return Err(anyhow!("Dependency task {} not found", dep_id));
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// 检查工作流中是否存在环
+    fn has_cycle_in_workflow(&self, workflow: &Workflow) -> bool {
+        let mut visited = HashSet::new();
+        let mut stack = HashSet::new();
+        
+        for task in &workflow.tasks {
+            if !visited.contains(&task.id) {
+                if self.dfs_check_cycle_workflow(&task.id, workflow, &mut visited, &mut stack) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+    
+    fn dfs_check_cycle_workflow(
+        &self,
+        task_id: &str,
+        workflow: &Workflow,
+        visited: &mut HashSet<String>,
+        stack: &mut HashSet<String>,
+    ) -> bool {
+        visited.insert(task_id.to_string());
+        stack.insert(task_id.to_string());
+        
+        if let Some(deps) = workflow.dependencies.get(task_id) {
+            for dep_id in deps {
+                if !visited.contains(dep_id) {
+                    if self.dfs_check_cycle_workflow(dep_id, workflow, visited, stack) {
+                        return true;
+                    }
+                } else if stack.contains(dep_id) {
+                    return true;
+                }
+            }
+        }
+        
+        stack.remove(task_id);
+        false
+    }
+    
+    /// 调度工作流中就绪的任务
+    async fn schedule_workflow_tasks(&self, workflow_id: &str) -> Result<()> {
+        let workflows = self.workflows.read().await;
+        let workflow = workflows.get(workflow_id)
+            .ok_or_else(|| anyhow!("Workflow not found"))?;
+        
+        // 找出所有就绪的任务
+        let ready_tasks: Vec<_> = workflow.tasks.iter()
+            .filter(|task| {
+                let deps = workflow.dependencies.get(&task.id).cloned().unwrap_or_default();
+                deps.iter().all(|dep_id| {
+                    workflow.tasks.iter()
+                        .find(|t| t.id == *dep_id)
+                        .map(|t| t.state == TaskState::Completed)
+                        .unwrap_or(false)
+                })
+            })
+            .collect();
+        
+        // 提交就绪的任务
+        for task in ready_tasks {
+            // 检查缓存
+            if let Some(cache_key) = &task.cache_key {
+                if let Some(cached_result) = self.get_cached_result(cache_key).await {
+                    self.update_workflow_task_state(
+                        workflow_id,
+                        &task.id,
+                        TaskState::Completed,
+                    ).await?;
+                    continue;
+                }
+            }
+            
+            // 提交任务
+            let mut task_spec = task.task_spec.clone();
+            task_spec.workflow_id = Some(workflow_id.to_string());
+            task_spec.retry_strategy = Some(task.retry_strategy.clone());
+            
+            self.submit_task(task_spec).await?;
+        }
+        
+        Ok(())
+    }
+    
+    /// 获取缓存的任务结果
+    async fn get_cached_result(&self, cache_key: &str) -> Option<TaskResult> {
+        let cache = self.task_cache.read().await;
+        cache.get(cache_key)
+            .filter(|entry| entry.created_at.elapsed() < entry.ttl)
+            .map(|entry| entry.result.clone())
+    }
+    
+    /// 更新工作流任务状态
+    async fn update_workflow_task_state(
+        &self,
+        workflow_id: &str,
+        task_id: &str,
+        state: TaskState,
+    ) -> Result<()> {
+        let mut workflows = self.workflows.write().await;
+        if let Some(workflow) = workflows.get_mut(workflow_id) {
+            if let Some(task) = workflow.tasks.iter_mut().find(|t| t.id == task_id) {
+                task.state = state;
+                
+                // 检查工作流状态
+                let all_completed = workflow.tasks.iter()
+                    .all(|t| t.state == TaskState::Completed);
+                let any_failed = workflow.tasks.iter()
+                    .any(|t| matches!(t.state, TaskState::Failed(_)));
+                
+                workflow.state = if all_completed {
+                    WorkflowState::Completed
+                } else if any_failed {
+                    WorkflowState::Failed("Some tasks failed".to_string())
+                } else {
+                    WorkflowState::Running
+                };
+                
+                // 如果任务完成，调度依赖的任务
+                if matches!(state, TaskState::Completed) {
+                    self.schedule_workflow_tasks(workflow_id).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+    
+    /// 预测资源使用
+    async fn predict_resource_usage(&self, task: &TaskSpec) -> ResourcePrediction {
+        self.resource_predictor.predict_task_resources(task).await
+    }
+    
+    /// 基于缓存位置选择工作节点
+    async fn select_cache_aware_worker(&self, task: &TaskSpec) -> Option<String> {
+        if let Some(cache_key) = &task.cache_key {
+            let cache = self.task_cache.read().await;
+            if let Some(entry) = cache.get(cache_key) {
+                // 找到拥有缓存数据的节点
+                let workers = self.workers.read().await;
+                for worker in workers.iter() {
+                    if worker.has_cached_data(cache_key).await {
+                        return Some(worker.node_info.node_id.to_string());
+                    }
+                }
+            }
+        }
+        None
+    }
+}
+
+// 资源预测器
+pub struct ResourcePredictor {
+    history: Arc<RwLock<HashMap<String, Vec<ResourceUsage>>>>,
+    model: Arc<RwLock<PredictionModel>>,
+}
+
+impl ResourcePredictor {
+    async fn predict_task_resources(&self, task: &TaskSpec) -> ResourcePrediction {
+        // 基于历史数据和机器学习模型预测资源使用
+        // 这里是简化的实现
+        ResourcePrediction {
+            cpu_usage: vec![(Instant::now(), 0.5)],
+            memory_usage: vec![(Instant::now(), 1024 * 1024)],
+            network_usage: vec![(Instant::now(), (1000, 1000))],
+            confidence: 0.8,
+        }
+    }
+}
+
+// 预测模型（示例）
+struct PredictionModel {
+    // 机器学习模型参数
 }
 
 #[derive(Debug, Default)]
