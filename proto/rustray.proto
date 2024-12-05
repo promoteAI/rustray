@@ -2,7 +2,7 @@ syntax = "proto3";
 package rustray;
 
 service RustRay {
-    rpc Connect (ConnectRequest) returns (ConnectResponse);
+    rpc ConnectClient (ConnectRequest) returns (ConnectResponse);
     rpc SubmitTask (TaskRequest) returns (TaskResponse);
     rpc GetTaskResult (TaskResultRequest) returns (TaskResultResponse);
     rpc CreateActor (CreateActorRequest) returns (CreateActorResponse);

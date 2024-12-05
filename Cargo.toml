@@ -19,6 +19,8 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 metrics = "0.20"
 dashmap = "5.4"
+bytes = "1.4"
+num_cpus = "1.15"
 
 [build-dependencies]
 tonic-build = "0.9"
