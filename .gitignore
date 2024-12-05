@@ -1,0 +1,57 @@
+# Rust 构建目录和生成文件
+/target/
+**/*.rs.bk
+
+# IDE 和编辑器文件
+.idea/
+.vscode/
+*.iml
+.vs/
+*.swp
+*~
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 日志和临时文件
+*.log
+logs/
+tmp/
+*.tmp
+*.bak
+
+# 环境和配置文件
+.env
+.env.*
+!.env.example
+config.local.toml
+
+# 生成的文件
+src/proto/*.rs
+src/grpc/*.rs
+
+# 测试和调试文件
+coverage/
+*.profraw
+perf.data
+perf.data.old
+flamegraph.svg
+
+# 文档生成目录
+/doc/
+/docs/target/
+
+# 示例程序的输出文件
+examples/**/*.jpg
+examples/**/*.png
+examples/**/*.dat
+examples/**/output/
+examples/**/*.result
+
+# 特定于项目的文件
+*.pid
+*.socket
+.rustray/
+node_data/
+worker_data/ 

@@ -2,6 +2,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
+pub mod object_store;
+
+pub use object_store::{ObjectId, ObjectRef, ObjectStore};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskSpec {
     pub task_id: Uuid,

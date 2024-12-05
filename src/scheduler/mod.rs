@@ -1,4 +1,10 @@
 pub mod load_balancer;
+pub mod task_graph;
+pub mod data_aware_scheduler;
+
+pub use load_balancer::{LoadBalancer, LoadBalancingStrategy};
+pub use task_graph::{TaskGraph, TaskId, TaskState};
+pub use data_aware_scheduler::{DataAwareScheduler, WorkerResources};
 
 use crate::common::TaskSpec;
 use crate::error::Result;

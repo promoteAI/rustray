@@ -21,4 +21,20 @@ metrics = "0.20"
 dashmap = "5.4"
 
 [build-dependencies]
-tonic-build = "0.9" 
+tonic-build = "0.9"
+
+[[example]]
+name = "matrix_multiply"
+path = "examples/matrix/matrix_multiply.rs"
+
+[[example]]
+name = "prime_finder"
+path = "examples/prime/prime_finder.rs"
+
+[[example]]
+name = "image_filter"
+path = "examples/image_processing/image_filter.rs"
+
+[dev-dependencies]
+image = "0.24"
+bincode = "1.3" 
