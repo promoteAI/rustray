@@ -1,0 +1,59 @@
+syntax = "proto3";
+package rustray;
+
+service HeadService {
+    rpc RegisterWorker (RegisterWorkerRequest) returns (RegisterWorkerResponse);
+    rpc Heartbeat (HeartbeatRequest) returns (HeartbeatResponse);
+}
+
+service WorkerService {
+    rpc ExecuteTask (ExecuteTaskRequest) returns (ExecuteTaskResponse);
+    rpc GetStatus (GetStatusRequest) returns (GetStatusResponse);
+}
+
+message RegisterWorkerRequest {
+    string worker_id = 1;
+    string address = 2;
+    uint32 port = 3;
+}
+
+message RegisterWorkerResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message HeartbeatRequest {
+    string worker_id = 1;
+    WorkerStatus status = 2;
+}
+
+message HeartbeatResponse {
+    bool success = 1;
+}
+
+message ExecuteTaskRequest {
+    string task_id = 1;
+    string function_name = 2;
+    repeated string args = 3;
+    map<string, string> kwargs = 4;
+}
+
+message ExecuteTaskResponse {
+    string task_id = 1;
+    bytes result = 2;
+    optional string error = 3;
+}
+
+message GetStatusRequest {
+    string worker_id = 1;
+}
+
+message GetStatusResponse {
+    WorkerStatus status = 1;
+}
+
+message WorkerStatus {
+    uint32 cpu_usage = 1;
+    uint32 memory_usage = 2;
+    uint32 task_count = 3;
+} 
