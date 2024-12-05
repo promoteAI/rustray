@@ -26,18 +26,65 @@
 
 ## 🔧 系统架构
 
-![系统架构图](docs/images/architecture.png)
+```mermaid
+graph TB
+    subgraph "Head Node"
+        HS[HeadService] --> LB[LoadBalancer]
+        LB --> SCH[Scheduler]
+        HS --> AM[AuthManager]
+        HS --> CM[ConnectionManager]
+        SCH --> NM[NotificationManager]
+    end
+    
+    subgraph "Worker Node"
+        WS[WorkerService] --> TE[TaskExecutor]
+        WS --> WM[WorkerManager]
+        WM --> RC[ReconnectManager]
+    end
+    
+    Client -- "gRPC" --> HS
+    HS -- "Task Distribution" --> WS
+    WS -- "Heartbeat/Status" --> HS
+    
+    classDef primary fill:#f9f,stroke:#333,stroke-width:2px
+    classDef secondary fill:#bbf,stroke:#333,stroke-width:1px
+    class HS,WS primary
+    class LB,SCH,AM,CM,TE,WM,RC,NM secondary
+```
 
-系统由以下核心组件构成：
+系统采用主从架构，由以下核心组件构成：
 
-| 组件 | 描述 |
-|------|------|
-| Head Node | 负责任务调度和节点管理 |
-| Worker Node | 执行具体的计算任务 |
-| Task Scheduler | 实现任务的智能分配 |
-| Load Balancer | 优化任务分配策略 |
-| Security Manager | 处理认证和授权 |
-| Connection Manager | 维护节点间的连接 |
+### Head Node（主节点）
+- **HeadService**: 主节点的 gRPC 服务接口，处理工作节点注册和任务分发
+- **LoadBalancer**: 负载均衡器，实现多种负载均衡策略
+- **Scheduler**: 任务调度器，管理任务分配和执行
+- **AuthManager**: 认证管理器，处理节点间的安全认证
+- **ConnectionManager**: 连接管理器，维护与工作节点的连接
+- **NotificationManager**: 通知管理器，处理任务完成事件
+
+### Worker Node（工作节点）
+- **WorkerService**: 工作节点的 gRPC 服务接口，接收和执行任务
+- **TaskExecutor**: 任务执行器，实际执行计算任务
+- **WorkerManager**: 工作节点管理器，维护节点状态
+- **ReconnectManager**: 重连管理器，处理与主节点的连接恢复
+
+### 通信协议
+系统使用 gRPC 进行节点间通信，主要接口包括：
+- RegisterWorker: 工作节点注册
+- Heartbeat: 心跳检测
+- ExecuteTask: 任务执行
+- GetStatus: 状态查询
+
+### 数据流
+1. 客户端提交任务到 Head Node
+2. Head Node 通过负载均衡选择合适的 Worker Node
+3. Worker Node 执行任务并返回结果
+4. NotificationManager 处理任务完成事件
+
+### 安全机制
+- JWT 认证确保节点间通信安全
+- 心跳检测保证节点存活性
+- 错误处理和自动重连机制
 
 ## 🚀 快速开始
 
