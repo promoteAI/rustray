@@ -17,10 +17,22 @@ use tokio::sync::broadcast;
 use crate::connection::ConnectionManager;
 use crate::error::Result;
 use crate::common::TaskResult;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use tonic::transport::Server;
+
+mod proto {
+    tonic::include_proto!("rustray");
+}
+
+use proto::rustray_server::RustRayServer;
+use crate::grpc::service::RustRayService;
+use crate::common::object_store::ObjectStore;
+use crate::scheduler::TaskScheduler;
 
 /// 应用程序入口点
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 设置日志记录
     tracing_subscriber::fmt::init();
     tracing::info!("Starting RustRay distributed system...");
@@ -57,6 +69,25 @@ async fn main() -> Result<()> {
         worker.node_info.node_id.to_string(),
     );
     tracing::info!("Connection manager initialized");
+
+    // 创建共享组件
+    let object_store = Arc::new(ObjectStore::new());
+    let scheduler = Arc::new(TaskScheduler::new());
+
+    // 创建 gRPC 服务
+    let service = RustRayService::new(
+        object_store.clone(),
+        scheduler.clone(),
+    );
+
+    // 启动 gRPC 服务器
+    let addr = "[::1]:8000".parse()?;
+    println!("RustRay server listening on {}", addr);
+
+    Server::builder()
+        .add_service(RustRayServer::new(service))
+        .serve(addr)
+        .await?;
 
     // 启动所有服务并等待终止信号
     tracing::info!("Starting all services...");

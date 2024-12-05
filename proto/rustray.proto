@@ -1,59 +1,102 @@
 syntax = "proto3";
 package rustray;
 
-service HeadService {
-    rpc RegisterWorker (RegisterWorkerRequest) returns (RegisterWorkerResponse);
-    rpc Heartbeat (HeartbeatRequest) returns (HeartbeatResponse);
+service RustRay {
+    rpc Connect (ConnectRequest) returns (ConnectResponse);
+    rpc SubmitTask (TaskRequest) returns (TaskResponse);
+    rpc GetTaskResult (TaskResultRequest) returns (TaskResultResponse);
+    rpc CreateActor (CreateActorRequest) returns (CreateActorResponse);
+    rpc CallActorMethod (CallActorRequest) returns (CallActorResponse);
+    rpc PutObject (PutObjectRequest) returns (PutObjectResponse);
+    rpc GetObject (GetObjectRequest) returns (GetObjectResponse);
+    rpc DeleteObject (DeleteObjectRequest) returns (DeleteObjectResponse);
 }
 
-service WorkerService {
-    rpc ExecuteTask (ExecuteTaskRequest) returns (ExecuteTaskResponse);
-    rpc GetStatus (GetStatusRequest) returns (GetStatusResponse);
+message ConnectRequest {
+    string client_id = 1;
+    map<string, string> config = 2;
 }
 
-message RegisterWorkerRequest {
-    string worker_id = 1;
-    string address = 2;
-    uint32 port = 3;
+message ConnectResponse {
+    string session_id = 1;
+    string head_address = 2;
 }
 
-message RegisterWorkerResponse {
-    bool success = 1;
-    string message = 2;
-}
-
-message HeartbeatRequest {
-    string worker_id = 1;
-    WorkerStatus status = 2;
-}
-
-message HeartbeatResponse {
-    bool success = 1;
-}
-
-message ExecuteTaskRequest {
-    string task_id = 1;
+message TaskRequest {
+    string session_id = 1;
     string function_name = 2;
-    repeated string args = 3;
-    map<string, string> kwargs = 4;
+    bytes args = 3;
+    map<string, string> resources = 4;
 }
 
-message ExecuteTaskResponse {
+message TaskResponse {
     string task_id = 1;
+}
+
+message TaskResultRequest {
+    string session_id = 1;
+    string task_id = 2;
+}
+
+message TaskResultResponse {
+    enum Status {
+        PENDING = 0;
+        RUNNING = 1;
+        COMPLETED = 2;
+        FAILED = 3;
+    }
+    Status status = 1;
     bytes result = 2;
-    optional string error = 3;
+    string error = 3;
 }
 
-message GetStatusRequest {
-    string worker_id = 1;
+message CreateActorRequest {
+    string session_id = 1;
+    string class_name = 2;
+    bytes args = 3;
+    map<string, string> resources = 4;
 }
 
-message GetStatusResponse {
-    WorkerStatus status = 1;
+message CreateActorResponse {
+    string actor_id = 1;
 }
 
-message WorkerStatus {
-    uint32 cpu_usage = 1;
-    uint32 memory_usage = 2;
-    uint32 task_count = 3;
+message CallActorRequest {
+    string session_id = 1;
+    string actor_id = 2;
+    string method_name = 3;
+    bytes args = 4;
+}
+
+message CallActorResponse {
+    string task_id = 1;
+}
+
+message PutObjectRequest {
+    string session_id = 1;
+    bytes data = 2;
+    string data_type = 3;
+}
+
+message PutObjectResponse {
+    string object_id = 1;
+}
+
+message GetObjectRequest {
+    string session_id = 1;
+    string object_id = 2;
+}
+
+message GetObjectResponse {
+    bytes data = 1;
+    string data_type = 2;
+}
+
+message DeleteObjectRequest {
+    string session_id = 1;
+    string object_id = 2;
+}
+
+message DeleteObjectResponse {
+    bool success = 1;
 } 
