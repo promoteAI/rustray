@@ -1,173 +1,156 @@
 use std::collections::{HashMap, HashSet};
-use uuid::Uuid;
-use tokio::sync::RwLock;
 use std::sync::Arc;
-use anyhow::Result;
+use tokio::sync::RwLock;
+use uuid::Uuid;
+use crate::common::object_store::ObjectId;
 
-/// 任务ID
-#[derive(Debug, Clone, Hash, Eq, PartialEq)]
-pub struct TaskId(Uuid);
-
-impl TaskId {
-    pub fn new() -> Self {
-        Self(Uuid::new_v4())
-    }
+#[derive(Debug, Clone)]
+pub struct TaskNode {
+    pub task_id: String,
+    pub function_name: String,
+    pub args: Vec<ObjectId>,  // 输入对象引用
+    pub outputs: Vec<ObjectId>,  // 输出对象引用
+    pub state: TaskState,
+    pub worker_id: Option<String>,
+    pub dependencies: HashSet<String>,  // 依赖任务的ID
+    pub dependents: HashSet<String>,    // 依赖此任务的任务ID
 }
 
-/// 任务状态
 #[derive(Debug, Clone, PartialEq)]
 pub enum TaskState {
     Pending,
+    Ready,
     Running,
     Completed,
     Failed(String),
 }
 
-/// 任务节点
-#[derive(Debug)]
-pub struct TaskNode {
-    pub id: TaskId,
-    pub state: TaskState,
-    pub dependencies: HashSet<TaskId>,
-    pub dependents: HashSet<TaskId>,
-    pub priority: i32,
-}
-
-/// 任务图管理器
 pub struct TaskGraph {
-    nodes: RwLock<HashMap<TaskId, Arc<RwLock<TaskNode>>>>,
+    nodes: Arc<RwLock<HashMap<String, TaskNode>>>,
+    object_to_task: Arc<RwLock<HashMap<ObjectId, String>>>,  // 对象到任务的映射
 }
 
 impl TaskGraph {
     pub fn new() -> Self {
         Self {
-            nodes: RwLock::new(HashMap::new()),
+            nodes: Arc::new(RwLock::new(HashMap::new())),
+            object_to_task: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    /// 添加任务
-    pub async fn add_task(&self, dependencies: Vec<TaskId>, priority: i32) -> Result<TaskId> {
-        let task_id = TaskId::new();
-        let mut deps = HashSet::new();
-        
-        // 添加依赖
-        for dep_id in dependencies {
-            if let Some(dep_node) = self.nodes.read().await.get(&dep_id) {
-                deps.insert(dep_id.clone());
-                // 更新依赖任务的依赖者列表
-                dep_node.write().await.dependents.insert(task_id.clone());
-            }
-        }
-        
-        // 创建新任务节点
-        let node = TaskNode {
-            id: task_id.clone(),
-            state: TaskState::Pending,
-            dependencies: deps,
-            dependents: HashSet::new(),
-            priority,
-        };
-        
-        // 添加到图中
-        self.nodes.write().await.insert(task_id.clone(), Arc::new(RwLock::new(node)));
-        
-        Ok(task_id)
-    }
-
-    /// 获取可执行的任务
-    pub async fn get_ready_tasks(&self) -> Vec<TaskId> {
-        let mut ready_tasks = Vec::new();
-        let nodes = self.nodes.read().await;
-        
-        for (task_id, node) in nodes.iter() {
-            let node = node.read().await;
-            if node.state == TaskState::Pending && node.dependencies.is_empty() {
-                ready_tasks.push(task_id.clone());
-            }
-        }
-        
-        // 按优先级排序
-        ready_tasks.sort_by_key(|task_id| {
-            -nodes.get(task_id).unwrap().blocking_read().priority
-        });
-        
-        ready_tasks
-    }
-
-    /// 更新任务状态
-    pub async fn update_task_state(&self, task_id: &TaskId, new_state: TaskState) -> Result<()> {
-        if let Some(node) = self.nodes.read().await.get(task_id) {
-            let mut node = node.write().await;
-            node.state = new_state.clone();
-            
-            // 如果任务完成，更新依赖它的任务
-            if new_state == TaskState::Completed {
-                for dependent_id in node.dependents.iter() {
-                    if let Some(dependent_node) = self.nodes.read().await.get(dependent_id) {
-                        let mut dependent_node = dependent_node.write().await;
-                        dependent_node.dependencies.remove(task_id);
-                    }
-                }
-            }
-        }
-        
-        Ok(())
-    }
-
-    /// 获取任务状态
-    pub async fn get_task_state(&self, task_id: &TaskId) -> Option<TaskState> {
-        self.nodes.read().await
-            .get(task_id)
-            .map(|node| node.read().blocking_read().state.clone())
-    }
-
-    /// 获取任务的所有依赖
-    pub async fn get_dependencies(&self, task_id: &TaskId) -> Option<HashSet<TaskId>> {
-        self.nodes.read().await
-            .get(task_id)
-            .map(|node| node.read().blocking_read().dependencies.clone())
-    }
-
-    /// 检查是否有环
-    pub async fn has_cycle(&self) -> bool {
-        let nodes = self.nodes.read().await;
-        let mut visited = HashSet::new();
-        let mut stack = HashSet::new();
-
-        for task_id in nodes.keys() {
-            if !visited.contains(task_id) {
-                if self.dfs_check_cycle(task_id, &nodes, &mut visited, &mut stack).await {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    async fn dfs_check_cycle(
+    pub async fn add_task(
         &self,
-        task_id: &TaskId,
-        nodes: &HashMap<TaskId, Arc<RwLock<TaskNode>>>,
-        visited: &mut HashSet<TaskId>,
-        stack: &mut HashSet<TaskId>,
-    ) -> bool {
-        visited.insert(task_id.clone());
-        stack.insert(task_id.clone());
+        function_name: String,
+        args: Vec<ObjectId>,
+        outputs: Vec<ObjectId>,
+    ) -> String {
+        let task_id = Uuid::new_v4().to_string();
+        let mut dependencies = HashSet::new();
 
-        if let Some(node) = nodes.get(task_id) {
-            let node = node.read().await;
-            for dep_id in &node.dependencies {
-                if !visited.contains(dep_id) {
-                    if self.dfs_check_cycle(dep_id, nodes, visited, stack).await {
-                        return true;
+        // 查找参数对象的生产者任务
+        for arg in &args {
+            if let Some(producer_id) = self.object_to_task.read().await.get(arg) {
+                dependencies.insert(producer_id.clone());
+            }
+        }
+
+        let node = TaskNode {
+            task_id: task_id.clone(),
+            function_name,
+            args,
+            outputs: outputs.clone(),
+            state: if dependencies.is_empty() {
+                TaskState::Ready
+            } else {
+                TaskState::Pending
+            },
+            worker_id: None,
+            dependencies,
+            dependents: HashSet::new(),
+        };
+
+        // 更新任务图
+        let mut nodes = self.nodes.write().await;
+        let mut object_map = self.object_to_task.write().await;
+
+        // 更新依赖关系
+        for dep_id in &node.dependencies {
+            if let Some(dep_node) = nodes.get_mut(dep_id) {
+                dep_node.dependents.insert(task_id.clone());
+            }
+        }
+
+        // 记录输出对象的生产者
+        for output in outputs {
+            object_map.insert(output, task_id.clone());
+        }
+
+        nodes.insert(task_id.clone(), node);
+        task_id
+    }
+
+    pub async fn get_ready_tasks(&self) -> Vec<String> {
+        let nodes = self.nodes.read().await;
+        nodes.values()
+            .filter(|node| node.state == TaskState::Ready)
+            .map(|node| node.task_id.clone())
+            .collect()
+    }
+
+    pub async fn mark_task_completed(&self, task_id: &str) -> Vec<String> {
+        let mut newly_ready = Vec::new();
+        let mut nodes = self.nodes.write().await;
+
+        if let Some(node) = nodes.get_mut(task_id) {
+            node.state = TaskState::Completed;
+
+            // 检查依赖此任务的任务是否可以执行
+            for dependent_id in &node.dependents {
+                if let Some(dependent_node) = nodes.get_mut(dependent_id) {
+                    let all_deps_completed = dependent_node.dependencies.iter()
+                        .all(|dep_id| {
+                            nodes.get(dep_id)
+                                .map(|n| n.state == TaskState::Completed)
+                                .unwrap_or(false)
+                        });
+
+                    if all_deps_completed && dependent_node.state == TaskState::Pending {
+                        dependent_node.state = TaskState::Ready;
+                        newly_ready.push(dependent_id.clone());
                     }
-                } else if stack.contains(dep_id) {
-                    return true;
                 }
             }
         }
 
-        stack.remove(task_id);
-        false
+        newly_ready
+    }
+
+    pub async fn get_task_info(&self, task_id: &str) -> Option<TaskNode> {
+        self.nodes.read().await.get(task_id).cloned()
+    }
+
+    pub async fn get_object_lineage(&self, object_id: &ObjectId) -> Vec<String> {
+        let mut lineage = Vec::new();
+        let nodes = self.nodes.read().await;
+        
+        if let Some(task_id) = self.object_to_task.read().await.get(object_id) {
+            let mut current_id = task_id.clone();
+            while let Some(node) = nodes.get(&current_id) {
+                lineage.push(current_id.clone());
+                if let Some(first_dep) = node.dependencies.iter().next() {
+                    current_id = first_dep.clone();
+                } else {
+                    break;
+                }
+            }
+        }
+        
+        lineage
+    }
+
+    pub async fn get_task_dependencies(&self, task_id: &str) -> Option<HashSet<String>> {
+        self.nodes.read().await
+            .get(task_id)
+            .map(|node| node.dependencies.clone())
     }
 } 
