@@ -34,6 +34,24 @@ RustRay 是一个现代化、高性能的分布式计算框架，专为大规模
 cargo build --release
 ```
 
+### Python SDK 使用
+
+```python
+import rustray
+
+# 初始化
+rustray.init()
+
+# 定义远程函数
+@rustray.remote
+def add(x, y):
+    return x + y
+
+# 调用函数
+future = add.remote(1, 2)
+result = rustray.get(future)  # result = 3
+```
+
 ### 运行示例
 
 ```bash
