@@ -1,261 +1,479 @@
+//! 指标收集器模块
+//! 
+//! 本模块实现了一个全面的性能指标收集和监控系统，支持：
+//! - 计数器、仪表、直方图等多种指标类型
+//! - 标签和维度支持
+//! - 聚合和统计功能
+//! - 指标导出和持久化
+//! - 告警规则配置
+
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
-use metrics::{Counter, Gauge, Histogram};
+use tokio::sync::mpsc;
+use tracing::{debug, error, info, warn};
 
+/// 指标类型
 #[derive(Debug, Clone)]
-pub struct TaskExecution {
-    pub task_id: String,
-    pub start_time: Instant,
-    pub end_time: Option<Instant>,
-    pub worker_id: String,
-    pub function_name: String,
-    pub input_sizes: Vec<usize>,
-    pub output_size: Option<usize>,
-    pub memory_used: usize,
-    pub cpu_usage: f64,
-}
-
-#[derive(Debug, Clone)]
-pub struct ResourceUsage {
-    pub cpu_usage: f64,
-    pub memory_used: usize,
-    pub memory_available: usize,
-    pub network_rx_bytes: u64,
-    pub network_tx_bytes: u64,
-    pub disk_used: u64,
-    pub disk_available: u64,
-}
-
-#[derive(Debug)]
 pub enum MetricType {
-    Counter(String),
-    Gauge(String),
-    Histogram(String),
+    /// 计数器（只增不减）
+    Counter,
+    /// 仪表（可增可减）
+    Gauge,
+    /// 直方图（数据分布）
+    Histogram,
+    /// 摘要（百分位数）
+    Summary,
 }
 
+/// 指标值
+#[derive(Debug, Clone)]
+pub enum MetricValue {
+    /// 单个数值
+    Single(f64),
+    /// 直方图数据
+    Histogram(Vec<f64>),
+    /// 摘要数据
+    Summary {
+        count: u64,
+        sum: f64,
+        min: f64,
+        max: f64,
+        p50: f64,
+        p90: f64,
+        p99: f64,
+    },
+}
+
+/// 指标定义
+#[derive(Debug, Clone)]
+pub struct MetricDefinition {
+    /// 指标名称
+    pub name: String,
+    /// 指标类型
+    pub metric_type: MetricType,
+    /// 指标描述
+    pub description: String,
+    /// 单位
+    pub unit: String,
+    /// 标签
+    pub labels: HashMap<String, String>,
+}
+
+/// 指标数据点
+#[derive(Debug, Clone)]
+pub struct MetricDataPoint {
+    /// 时间戳
+    pub timestamp: u64,
+    /// 指标值
+    pub value: MetricValue,
+    /// 标签
+    pub labels: HashMap<String, String>,
+}
+
+/// 告警规则
+#[derive(Debug, Clone)]
+pub struct AlertRule {
+    /// 规则名称
+    pub name: String,
+    /// 指标名称
+    pub metric_name: String,
+    /// 阈值
+    pub threshold: f64,
+    /// 比较操作符
+    pub operator: String,
+    /// 持续时间
+    pub duration: Duration,
+    /// 严重程度
+    pub severity: String,
+}
+
+/// 指标收集器
 pub struct MetricsCollector {
-    // 任务执行历史
-    task_history: Arc<RwLock<HashMap<String, TaskExecution>>>,
-    
-    // 资源使用情况
-    resource_history: Arc<RwLock<Vec<(Instant, ResourceUsage)>>>,
-    
-    // 性能指标
-    counters: HashMap<String, Counter>,
-    gauges: HashMap<String, Gauge>,
-    histograms: HashMap<String, Histogram>,
-    
-    // 配置
-    history_window: Duration,
-    sampling_interval: Duration,
+    /// 命名空间
+    namespace: String,
+    /// 指标定义映射
+    definitions: Arc<Mutex<HashMap<String, MetricDefinition>>>,
+    /// 指标数据映射
+    data: Arc<Mutex<HashMap<String, Vec<MetricDataPoint>>>>,
+    /// 告警规则列表
+    alert_rules: Arc<Mutex<Vec<AlertRule>>>,
+    /// 告警通道
+    alert_tx: mpsc::Sender<Alert>,
+}
+
+/// 告警信息
+#[derive(Debug, Clone)]
+pub struct Alert {
+    /// 告警名称
+    pub name: String,
+    /// 指标名称
+    pub metric_name: String,
+    /// 当前值
+    pub current_value: f64,
+    /// 阈值
+    pub threshold: f64,
+    /// 严重程度
+    pub severity: String,
+    /// 触发时间
+    pub timestamp: u64,
+    /// 标签
+    pub labels: HashMap<String, String>,
 }
 
 impl MetricsCollector {
-    pub fn new(history_window: Duration, sampling_interval: Duration) -> Self {
-        // 初始化基本指标
-        let mut counters = HashMap::new();
-        let mut gauges = HashMap::new();
-        let mut histograms = HashMap::new();
-
-        // 任务相关指标
-        counters.insert(
-            "tasks_submitted".to_string(),
-            Counter::new("tasks_submitted"),
-        );
-        counters.insert(
-            "tasks_completed".to_string(),
-            Counter::new("tasks_completed"),
-        );
-        counters.insert(
-            "tasks_failed".to_string(),
-            Counter::new("tasks_failed"),
-        );
-
-        // 资源相关指标
-        gauges.insert(
-            "cpu_usage".to_string(),
-            Gauge::new("cpu_usage"),
-        );
-        gauges.insert(
-            "memory_used".to_string(),
-            Gauge::new("memory_used"),
-        );
-        gauges.insert(
-            "memory_available".to_string(),
-            Gauge::new("memory_available"),
-        );
-
-        // 延迟相关指标
-        histograms.insert(
-            "task_duration".to_string(),
-            Histogram::new("task_duration"),
-        );
-        histograms.insert(
-            "scheduling_latency".to_string(),
-            Histogram::new("scheduling_latency"),
-        );
-
+    /// 创建新的指标收集器
+    pub fn new(namespace: String) -> Self {
+        let (alert_tx, _) = mpsc::channel(100);
         Self {
-            task_history: Arc::new(RwLock::new(HashMap::new())),
-            resource_history: Arc::new(RwLock::new(Vec::new())),
-            counters,
-            gauges,
-            histograms,
-            history_window,
-            sampling_interval,
+            namespace,
+            definitions: Arc::new(Mutex::new(HashMap::new())),
+            data: Arc::new(Mutex::new(HashMap::new())),
+            alert_rules: Arc::new(Mutex::new(Vec::new())),
+            alert_tx,
         }
     }
 
-    pub async fn record_task_start(
+    /// 注册新指标
+    pub fn register_metric(
         &self,
-        task_id: String,
-        worker_id: String,
-        function_name: String,
-        input_sizes: Vec<usize>,
-    ) {
-        let execution = TaskExecution {
-            task_id: task_id.clone(),
-            start_time: Instant::now(),
-            end_time: None,
-            worker_id,
-            function_name,
-            input_sizes,
-            output_size: None,
-            memory_used: 0,
-            cpu_usage: 0.0,
+        name: &str,
+        metric_type: MetricType,
+        description: &str,
+        unit: &str,
+        labels: HashMap<String, String>,
+    ) -> Result<(), String> {
+        let metric_name = format!("{}.{}", self.namespace, name);
+        let mut definitions = self.definitions.lock().map_err(|e| e.to_string())?;
+
+        let definition = MetricDefinition {
+            name: metric_name.clone(),
+            metric_type,
+            description: description.to_string(),
+            unit: unit.to_string(),
+            labels,
         };
 
-        self.task_history.write().await.insert(task_id, execution);
-        self.counters.get("tasks_submitted")
-            .unwrap()
-            .increment(1);
+        definitions.insert(metric_name.clone(), definition);
+        self.data.lock().map_err(|e| e.to_string())?
+            .insert(metric_name, Vec::new());
+
+        info!("Registered metric: {}", name);
+        Ok(())
     }
 
-    pub async fn record_task_completion(
-        &self,
-        task_id: String,
-        output_size: usize,
-        memory_used: usize,
-        cpu_usage: f64,
-    ) {
-        if let Some(mut execution) = self.task_history.write().await.get_mut(&task_id) {
-            execution.end_time = Some(Instant::now());
-            execution.output_size = Some(output_size);
-            execution.memory_used = memory_used;
-            execution.cpu_usage = cpu_usage;
+    /// 增加计数器值
+    pub fn increment_counter(&self, name: &str, value: u64) -> Result<(), String> {
+        self.record_value(name, MetricValue::Single(value as f64))
+    }
 
-            // 记录任务执行时间
-            if let Some(duration) = execution.end_time.unwrap().checked_duration_since(execution.start_time) {
-                self.histograms.get("task_duration")
-                    .unwrap()
-                    .record(duration.as_secs_f64());
+    /// 设置仪表值
+    pub fn set_gauge(&self, name: &str, value: f64) -> Result<(), String> {
+        self.record_value(name, MetricValue::Single(value))
+    }
+
+    /// 记录直方图数据
+    pub fn record_histogram(&self, name: &str, value: f64) -> Result<(), String> {
+        let metric_name = format!("{}.{}", self.namespace, name);
+        let mut data = self.data.lock().map_err(|e| e.to_string())?;
+        
+        if let Some(points) = data.get_mut(&metric_name) {
+            if let Some(last_point) = points.last() {
+                if let MetricValue::Histogram(mut values) = last_point.value.clone() {
+                    values.push(value);
+                    points.push(MetricDataPoint {
+                        timestamp: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs(),
+                        value: MetricValue::Histogram(values),
+                        labels: last_point.labels.clone(),
+                    });
+                }
             }
         }
 
-        self.counters.get("tasks_completed")
-            .unwrap()
-            .increment(1);
+        Ok(())
     }
 
-    pub async fn record_task_failure(&self, task_id: String, error: String) {
-        if let Some(mut execution) = self.task_history.write().await.get_mut(&task_id) {
-            execution.end_time = Some(Instant::now());
-        }
-
-        self.counters.get("tasks_failed")
-            .unwrap()
-            .increment(1);
-    }
-
-    pub async fn record_resource_usage(&self, usage: ResourceUsage) {
-        let now = Instant::now();
-        let mut history = self.resource_history.write().await;
+    /// 记录摘要数据
+    pub fn record_summary(&self, name: &str, value: f64) -> Result<(), String> {
+        let metric_name = format!("{}.{}", self.namespace, name);
+        let mut data = self.data.lock().map_err(|e| e.to_string())?;
         
-        // 更新资源使用指标
-        self.gauges.get("cpu_usage")
-            .unwrap()
-            .set(usage.cpu_usage);
-        self.gauges.get("memory_used")
-            .unwrap()
-            .set(usage.memory_used as f64);
-        self.gauges.get("memory_available")
-            .unwrap()
-            .set(usage.memory_available as f64);
-
-        // 添加到历史记录
-        history.push((now, usage));
-
-        // 清理过期数据
-        let cutoff = now - self.history_window;
-        history.retain(|(t, _)| *t >= cutoff);
-    }
-
-    pub async fn get_task_stats(&self) -> HashMap<String, f64> {
-        let mut stats = HashMap::new();
-        let history = self.task_history.read().await;
-
-        let completed_tasks: Vec<_> = history.values()
-            .filter(|task| task.end_time.is_some())
-            .collect();
-
-        if !completed_tasks.is_empty() {
-            // 平均执行时间
-            let avg_duration: f64 = completed_tasks.iter()
-                .filter_map(|task| {
-                    task.end_time?
-                        .checked_duration_since(task.start_time)
-                        .map(|d| d.as_secs_f64())
-                })
-                .sum::<f64>() / completed_tasks.len() as f64;
-            stats.insert("avg_duration".to_string(), avg_duration);
-
-            // 平均内存使用
-            let avg_memory: f64 = completed_tasks.iter()
-                .map(|task| task.memory_used as f64)
-                .sum::<f64>() / completed_tasks.len() as f64;
-            stats.insert("avg_memory".to_string(), avg_memory);
-
-            // 平均CPU使用率
-            let avg_cpu: f64 = completed_tasks.iter()
-                .map(|task| task.cpu_usage)
-                .sum::<f64>() / completed_tasks.len() as f64;
-            stats.insert("avg_cpu".to_string(), avg_cpu);
+        if let Some(points) = data.get_mut(&metric_name) {
+            if let Some(last_point) = points.last() {
+                if let MetricValue::Summary { count, sum, min, max, .. } = last_point.value {
+                    let new_count = count + 1;
+                    let new_sum = sum + value;
+                    let new_min = min.min(value);
+                    let new_max = max.max(value);
+                    
+                    // 简单计算百分位数（实际应该使用更复杂的算法）
+                    points.push(MetricDataPoint {
+                        timestamp: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs(),
+                        value: MetricValue::Summary {
+                            count: new_count,
+                            sum: new_sum,
+                            min: new_min,
+                            max: new_max,
+                            p50: value, // 简化处理
+                            p90: value,
+                            p99: value,
+                        },
+                        labels: last_point.labels.clone(),
+                    });
+                }
+            }
         }
 
-        stats
+        Ok(())
     }
 
-    pub async fn get_resource_stats(&self) -> HashMap<String, f64> {
-        let mut stats = HashMap::new();
-        let history = self.resource_history.read().await;
+    /// 添加告警规则
+    pub fn add_alert_rule(
+        &self,
+        name: &str,
+        metric_name: &str,
+        threshold: f64,
+        operator: &str,
+        duration: Duration,
+        severity: &str,
+    ) -> Result<(), String> {
+        let rule = AlertRule {
+            name: name.to_string(),
+            metric_name: format!("{}.{}", self.namespace, metric_name),
+            threshold,
+            operator: operator.to_string(),
+            duration,
+            severity: severity.to_string(),
+        };
 
-        if !history.is_empty() {
-            // 平均CPU使用率
-            let avg_cpu: f64 = history.iter()
-                .map(|(_, usage)| usage.cpu_usage)
-                .sum::<f64>() / history.len() as f64;
-            stats.insert("avg_cpu_usage".to_string(), avg_cpu);
+        self.alert_rules.lock().map_err(|e| e.to_string())?
+            .push(rule);
 
-            // 平均内存使用
-            let avg_memory: f64 = history.iter()
-                .map(|(_, usage)| usage.memory_used as f64)
-                .sum::<f64>() / history.len() as f64;
-            stats.insert("avg_memory_used".to_string(), avg_memory);
+        info!("Added alert rule: {}", name);
+        Ok(())
+    }
 
-            // 网络使用趋势
-            let network_rx: f64 = history.iter()
-                .map(|(_, usage)| usage.network_rx_bytes as f64)
-                .sum::<f64>() / history.len() as f64;
-            stats.insert("avg_network_rx".to_string(), network_rx);
+    /// 检查告警规则
+    pub fn check_alerts(&self) -> Result<(), String> {
+        let rules = self.alert_rules.lock().map_err(|e| e.to_string())?;
+        let data = self.data.lock().map_err(|e| e.to_string())?;
 
-            let network_tx: f64 = history.iter()
-                .map(|(_, usage)| usage.network_tx_bytes as f64)
-                .sum::<f64>() / history.len() as f64;
-            stats.insert("avg_network_tx".to_string(), network_tx);
+        for rule in rules.iter() {
+            if let Some(points) = data.get(&rule.metric_name) {
+                if let Some(latest) = points.last() {
+                    if let MetricValue::Single(value) = latest.value {
+                        let triggered = match rule.operator.as_str() {
+                            ">" => value > rule.threshold,
+                            "<" => value < rule.threshold,
+                            ">=" => value >= rule.threshold,
+                            "<=" => value <= rule.threshold,
+                            "==" => (value - rule.threshold).abs() < f64::EPSILON,
+                            _ => false,
+                        };
+
+                        if triggered {
+                            let alert = Alert {
+                                name: rule.name.clone(),
+                                metric_name: rule.metric_name.clone(),
+                                current_value: value,
+                                threshold: rule.threshold,
+                                severity: rule.severity.clone(),
+                                timestamp: latest.timestamp,
+                                labels: latest.labels.clone(),
+                            };
+
+                            self.alert_tx.try_send(alert)
+                                .map_err(|e| e.to_string())?;
+                        }
+                    }
+                }
+            }
         }
 
-        stats
+        Ok(())
+    }
+
+    /// 导出指标数据
+    pub fn export_metrics(&self) -> Result<String, String> {
+        let definitions = self.definitions.lock().map_err(|e| e.to_string())?;
+        let data = self.data.lock().map_err(|e| e.to_string())?;
+        let mut output = String::new();
+
+        for (name, def) in definitions.iter() {
+            output.push_str(&format!("# HELP {} {}\n", name, def.description));
+            output.push_str(&format!("# TYPE {} {:?}\n", name, def.metric_type));
+
+            if let Some(points) = data.get(name) {
+                if let Some(latest) = points.last() {
+                    let labels = latest.labels.iter()
+                        .map(|(k, v)| format!("{}=\"{}\"", k, v))
+                        .collect::<Vec<_>>()
+                        .join(",");
+
+                    match &latest.value {
+                        MetricValue::Single(v) => {
+                            output.push_str(&format!("{}{{{}}} {}\n", name, labels, v));
+                        }
+                        MetricValue::Histogram(values) => {
+                            let mut sum = 0.0;
+                            let mut count = 0;
+                            for v in values {
+                                sum += v;
+                                count += 1;
+                                output.push_str(&format!(
+                                    "{}{{{}}} {}\n",
+                                    name, labels, v
+                                ));
+                            }
+                            output.push_str(&format!(
+                                "{}_sum{{{}}} {}\n", name, labels, sum
+                            ));
+                            output.push_str(&format!(
+                                "{}_count{{{}}} {}\n", name, labels, count
+                            ));
+                        }
+                        MetricValue::Summary { count, sum, min, max, p50, p90, p99 } => {
+                            output.push_str(&format!(
+                                "{}_sum{{{}}} {}\n", name, labels, sum
+                            ));
+                            output.push_str(&format!(
+                                "{}_count{{{}}} {}\n", name, labels, count
+                            ));
+                            output.push_str(&format!(
+                                "{}_min{{{}}} {}\n", name, labels, min
+                            ));
+                            output.push_str(&format!(
+                                "{}_max{{{}}} {}\n", name, labels, max
+                            ));
+                            output.push_str(&format!(
+                                "{}_p50{{{}}} {}\n", name, labels, p50
+                            ));
+                            output.push_str(&format!(
+                                "{}_p90{{{}}} {}\n", name, labels, p90
+                            ));
+                            output.push_str(&format!(
+                                "{}_p99{{{}}} {}\n", name, labels, p99
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(output)
+    }
+
+    // 私有辅助方法
+
+    /// 记录指标值
+    fn record_value(&self, name: &str, value: MetricValue) -> Result<(), String> {
+        let metric_name = format!("{}.{}", self.namespace, name);
+        let mut data = self.data.lock().map_err(|e| e.to_string())?;
+        
+        if let Some(points) = data.get_mut(&metric_name) {
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+
+            let labels = self.definitions.lock().map_err(|e| e.to_string())?
+                .get(&metric_name)
+                .map(|def| def.labels.clone())
+                .unwrap_or_default();
+
+            points.push(MetricDataPoint {
+                timestamp,
+                value,
+                labels,
+            });
+
+            // 检查告警
+            self.check_alerts()?;
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_metrics_collector_creation() {
+        let collector = MetricsCollector::new("test".to_string());
+        assert!(collector.definitions.lock().unwrap().is_empty());
+        assert!(collector.data.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_metric_registration() {
+        let collector = MetricsCollector::new("test".to_string());
+        let result = collector.register_metric(
+            "requests_total",
+            MetricType::Counter,
+            "Total number of requests",
+            "requests",
+            HashMap::new(),
+        );
+        
+        assert!(result.is_ok());
+        assert_eq!(collector.definitions.lock().unwrap().len(), 1);
+        assert_eq!(collector.data.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_counter_increment() {
+        let collector = MetricsCollector::new("test".to_string());
+        collector.register_metric(
+            "requests_total",
+            MetricType::Counter,
+            "Total number of requests",
+            "requests",
+            HashMap::new(),
+        ).unwrap();
+
+        let result = collector.increment_counter("requests_total", 1);
+        assert!(result.is_ok());
+
+        let data = collector.data.lock().unwrap();
+        let points = data.get("test.requests_total").unwrap();
+        assert_eq!(points.len(), 1);
+        
+        if let MetricValue::Single(value) = points[0].value {
+            assert_eq!(value, 1.0);
+        } else {
+            panic!("Unexpected metric value type");
+        }
+    }
+
+    #[test]
+    fn test_alert_rule() {
+        let collector = MetricsCollector::new("test".to_string());
+        collector.register_metric(
+            "cpu_usage",
+            MetricType::Gauge,
+            "CPU usage percentage",
+            "percent",
+            HashMap::new(),
+        ).unwrap();
+
+        let result = collector.add_alert_rule(
+            "high_cpu",
+            "cpu_usage",
+            90.0,
+            ">",
+            Duration::from_secs(60),
+            "critical",
+        );
+        
+        assert!(result.is_ok());
+        assert_eq!(collector.alert_rules.lock().unwrap().len(), 1);
     }
 } 

@@ -1,223 +1,406 @@
-use std::sync::Arc;
-use tokio::sync::RwLock;
+//! 认证模块
+//! 
+//! 本模块实现了系统的认证和授权功能，支持：
+//! - 用户认证和会话管理
+//! - 基于角色的访问控制(RBAC)
+//! - 权限管理
+//! - 安全令牌生成和验证
+//! - 审计日志
+
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use jsonwebtoken::{encode, decode, Header, Validation, EncodingKey, DecodingKey};
-use serde::{Serialize, Deserialize};
-use argon2::{self, Config};
-use rand::Rng;
-use anyhow::{Result, anyhow};
-use tracing::{info, warn, error};
+use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
+use tracing::{debug, error, info, warn};
+use uuid::Uuid;
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Claims {
-    sub: String,  // 用户ID
-    exp: usize,   // 过期时间
-    iat: usize,   // 签发时间
-    role: String, // 用户角色
+use crate::metrics::MetricsCollector;
+
+/// 用户角色
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum UserRole {
+    /// 管理员
+    Admin,
+    /// 普通用户
+    User,
+    /// 访客
+    Guest,
 }
 
+/// 权限类型
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Permission {
+    /// 读取权限
+    Read,
+    /// 写入权限
+    Write,
+    /// 执行权限
+    Execute,
+    /// 管理权限
+    Manage,
+}
+
+/// 用户信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
+    /// 用户ID
     pub id: String,
+    /// 用户名
     pub username: String,
+    /// 密码哈希
     pub password_hash: String,
-    pub role: String,
-    pub created_at: SystemTime,
-    pub last_login: Option<SystemTime>,
+    /// 角色
+    pub role: UserRole,
+    /// 权限列表
+    pub permissions: Vec<Permission>,
+    /// 创建时间
+    pub created_at: u64,
+    /// 最后登录时间
+    pub last_login: Option<u64>,
 }
 
+/// 会话信息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Session {
+    /// 会话ID
+    pub id: String,
+    /// 用户ID
+    pub user_id: String,
+    /// 创建时间
+    pub created_at: u64,
+    /// 过期时间
+    pub expires_at: u64,
+    /// IP地址
+    pub ip_address: String,
+    /// 用户代理
+    pub user_agent: String,
+}
+
+/// JWT声明
+#[derive(Debug, Serialize, Deserialize)]
+struct Claims {
+    /// 主题（用户ID）
+    sub: String,
+    /// 过期时间
+    exp: u64,
+    /// 发行时间
+    iat: u64,
+    /// 角色
+    role: UserRole,
+}
+
+/// 认证管理器
 pub struct AuthManager {
-    users: Arc<RwLock<HashMap<String, User>>>,
+    /// 用户映射
+    users: Arc<Mutex<HashMap<String, User>>>,
+    /// 会话映射
+    sessions: Arc<Mutex<HashMap<String, Session>>>,
+    /// JWT密钥
     jwt_secret: String,
-    token_expiration: Duration,
-    max_failed_attempts: u32,
-    failed_attempts: Arc<RwLock<HashMap<String, (u32, SystemTime)>>>,
-    lockout_duration: Duration,
+    /// 会话过期时间
+    session_ttl: Duration,
+    /// 指标收集器
+    metrics: Arc<MetricsCollector>,
+    /// 审计日志通道
+    audit_tx: mpsc::Sender<AuditLog>,
+}
+
+/// 审计日志
+#[derive(Debug, Clone, Serialize)]
+pub struct AuditLog {
+    /// 事件ID
+    pub event_id: String,
+    /// 事件类型
+    pub event_type: String,
+    /// 用户ID
+    pub user_id: String,
+    /// 资源
+    pub resource: String,
+    /// 操作
+    pub action: String,
+    /// 状态
+    pub status: String,
+    /// 时间戳
+    pub timestamp: u64,
+    /// 详细信息
+    pub details: String,
 }
 
 impl AuthManager {
+    /// 创建新的认证管理器
     pub fn new(
         jwt_secret: String,
-        token_expiration: Duration,
-        max_failed_attempts: u32,
-        lockout_duration: Duration,
+        session_ttl: Duration,
+        metrics: Arc<MetricsCollector>,
+        audit_tx: mpsc::Sender<AuditLog>,
     ) -> Self {
         Self {
-            users: Arc::new(RwLock::new(HashMap::new())),
+            users: Arc::new(Mutex::new(HashMap::new())),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
             jwt_secret,
-            token_expiration,
-            max_failed_attempts,
-            failed_attempts: Arc::new(RwLock::new(HashMap::new())),
-            lockout_duration,
+            session_ttl,
+            metrics,
+            audit_tx,
         }
     }
 
+    /// 注册新用户
     pub async fn register_user(
         &self,
         username: String,
         password: String,
-        role: String,
-    ) -> Result<String> {
+        role: UserRole,
+    ) -> Result<User, String> {
+        let users = self.users.lock().map_err(|e| e.to_string())?;
+        
         // 检查用户名是否已存在
-        let users = self.users.read().await;
         if users.values().any(|u| u.username == username) {
-            return Err(anyhow!("Username already exists"));
+            return Err("Username already exists".to_string());
         }
-        drop(users);
 
-        // 生成密码哈希
-        let salt = rand::thread_rng().gen::<[u8; 32]>();
-        let config = Config::default();
-        let hash = argon2::hash_encoded(
-            password.as_bytes(),
-            &salt,
-            &config,
-        )?;
-
-        // 创建新用户
+        // 创建用户
         let user = User {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: Uuid::new_v4().to_string(),
             username,
-            password_hash: hash,
+            password_hash: Self::hash_password(&password)?,
             role,
-            created_at: SystemTime::now(),
+            permissions: Self::get_default_permissions(&role),
+            created_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
             last_login: None,
         };
 
         // 保存用户
-        let user_id = user.id.clone();
-        self.users.write().await.insert(user_id.clone(), user);
+        users.insert(user.id.clone(), user.clone());
 
-        info!("New user registered: {}", user_id);
-        Ok(user_id)
+        // 记录审计日志
+        self.log_audit(
+            "user_registration",
+            &user.id,
+            "user",
+            "create",
+            "success",
+            "User registration successful",
+        ).await?;
+
+        // 更新指标
+        self.metrics.increment_counter("auth.users.registered", 1)
+            .map_err(|e| e.to_string())?;
+
+        Ok(user)
     }
 
-    pub async fn login(&self, username: String, password: String) -> Result<String> {
-        // 检查账户锁定状态
-        if self.is_account_locked(&username).await {
-            return Err(anyhow!("Account is locked due to too many failed attempts"));
-        }
-
+    /// 用户登录
+    pub async fn login(
+        &self,
+        username: &str,
+        password: &str,
+        ip_address: String,
+        user_agent: String,
+    ) -> Result<(String, String), String> {
+        let mut users = self.users.lock().map_err(|e| e.to_string())?;
+        
         // 查找用户
-        let mut users = self.users.write().await;
-        let user = users.values_mut().find(|u| u.username == username)
-            .ok_or_else(|| anyhow!("User not found"))?;
+        let user = users.values_mut()
+            .find(|u| u.username == username)
+            .ok_or_else(|| "User not found".to_string())?;
 
         // 验证密码
-        if !argon2::verify_encoded(&user.password_hash, password.as_bytes())? {
-            self.record_failed_attempt(&username).await;
-            return Err(anyhow!("Invalid password"));
+        if !Self::verify_password(&password, &user.password_hash)? {
+            // 记录失败
+            self.log_audit(
+                "login_failed",
+                &user.id,
+                "session",
+                "create",
+                "failed",
+                "Invalid password",
+            ).await?;
+
+            self.metrics.increment_counter("auth.login.failed", 1)
+                .map_err(|e| e.to_string())?;
+
+            return Err("Invalid password".to_string());
         }
 
-        // 清除失败尝试记录
-        self.clear_failed_attempts(&username).await;
-
         // 更新最后登录时间
-        user.last_login = Some(SystemTime::now());
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        user.last_login = Some(now);
 
-        // 生成 JWT token
-        let expiration = SystemTime::now()
-            .duration_since(UNIX_EPOCH)?
-            .as_secs() as usize + self.token_expiration.as_secs() as usize;
+        // 创建会话
+        let session = Session {
+            id: Uuid::new_v4().to_string(),
+            user_id: user.id.clone(),
+            created_at: now,
+            expires_at: now + self.session_ttl.as_secs(),
+            ip_address,
+            user_agent,
+        };
+
+        // 生成JWT
+        let token = self.generate_token(user)?;
+
+        // 保存会话
+        self.sessions.lock().map_err(|e| e.to_string())?
+            .insert(session.id.clone(), session);
+
+        // 记录审计日志
+        self.log_audit(
+            "login_success",
+            &user.id,
+            "session",
+            "create",
+            "success",
+            "User login successful",
+        ).await?;
+
+        // 更新指标
+        self.metrics.increment_counter("auth.login.success", 1)
+            .map_err(|e| e.to_string())?;
+
+        Ok((session.id, token))
+    }
+
+    /// 验证令牌
+    pub fn verify_token(&self, token: &str) -> Result<User, String> {
+        let validation = Validation::default();
+        let key = DecodingKey::from_secret(self.jwt_secret.as_bytes());
+
+        let claims = decode::<Claims>(token, &key, &validation)
+            .map_err(|e| format!("Invalid token: {}", e))?
+            .claims;
+
+        let users = self.users.lock().map_err(|e| e.to_string())?;
+        users.get(&claims.sub)
+            .cloned()
+            .ok_or_else(|| "User not found".to_string())
+    }
+
+    /// 检查权限
+    pub fn check_permission(
+        &self,
+        user_id: &str,
+        required_permission: &Permission,
+    ) -> Result<bool, String> {
+        let users = self.users.lock().map_err(|e| e.to_string())?;
+        
+        let user = users.get(user_id)
+            .ok_or_else(|| "User not found".to_string())?;
+
+        Ok(user.permissions.contains(required_permission))
+    }
+
+    /// 注销会话
+    pub async fn logout(&self, session_id: &str) -> Result<(), String> {
+        let mut sessions = self.sessions.lock().map_err(|e| e.to_string())?;
+        
+        if let Some(session) = sessions.remove(session_id) {
+            // 记录审计日志
+            self.log_audit(
+                "logout",
+                &session.user_id,
+                "session",
+                "delete",
+                "success",
+                "User logout successful",
+            ).await?;
+
+            // 更新指标
+            self.metrics.increment_counter("auth.logout", 1)
+                .map_err(|e| e.to_string())?;
+        }
+
+        Ok(())
+    }
+
+    // 私有辅助方法
+
+    /// 生成JWT令牌
+    fn generate_token(&self, user: &User) -> Result<String, String> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
 
         let claims = Claims {
             sub: user.id.clone(),
-            exp: expiration,
-            iat: SystemTime::now()
-                .duration_since(UNIX_EPOCH)?
-                .as_secs() as usize,
+            exp: now + self.session_ttl.as_secs(),
+            iat: now,
             role: user.role.clone(),
         };
 
-        let token = encode(
+        encode(
             &Header::default(),
             &claims,
             &EncodingKey::from_secret(self.jwt_secret.as_bytes()),
-        )?;
-
-        info!("User logged in successfully: {}", user.id);
-        Ok(token)
+        ).map_err(|e| format!("Failed to generate token: {}", e))
     }
 
-    pub async fn verify_token(&self, token: &str) -> Result<Claims> {
-        let validation = Validation::default();
-        let key = DecodingKey::from_secret(self.jwt_secret.as_bytes());
-        
-        match decode::<Claims>(token, &key, &validation) {
-            Ok(token_data) => Ok(token_data.claims),
-            Err(e) => {
-                warn!("Token verification failed: {}", e);
-                Err(anyhow!("Invalid token"))
-            }
+    /// 获取默认权限
+    fn get_default_permissions(role: &UserRole) -> Vec<Permission> {
+        match role {
+            UserRole::Admin => vec![
+                Permission::Read,
+                Permission::Write,
+                Permission::Execute,
+                Permission::Manage,
+            ],
+            UserRole::User => vec![
+                Permission::Read,
+                Permission::Write,
+                Permission::Execute,
+            ],
+            UserRole::Guest => vec![
+                Permission::Read,
+            ],
         }
     }
 
-    async fn is_account_locked(&self, username: &str) -> bool {
-        let attempts = self.failed_attempts.read().await;
-        if let Some((count, time)) = attempts.get(username) {
-            if *count >= self.max_failed_attempts {
-                let elapsed = SystemTime::now()
-                    .duration_since(*time)
-                    .unwrap_or(Duration::from_secs(0));
-                return elapsed < self.lockout_duration;
-            }
-        }
-        false
+    /// 密码哈希
+    fn hash_password(password: &str) -> Result<String, String> {
+        bcrypt::hash(password, bcrypt::DEFAULT_COST)
+            .map_err(|e| format!("Failed to hash password: {}", e))
     }
 
-    async fn record_failed_attempt(&self, username: &str) {
-        let mut attempts = self.failed_attempts.write().await;
-        let entry = attempts.entry(username.to_string())
-            .or_insert((0, SystemTime::now()));
-        entry.0 += 1;
-        entry.1 = SystemTime::now();
-        
-        if entry.0 >= self.max_failed_attempts {
-            warn!("Account locked due to too many failed attempts: {}", username);
-        }
+    /// 验证密码
+    fn verify_password(password: &str, hash: &str) -> Result<bool, String> {
+        bcrypt::verify(password, hash)
+            .map_err(|e| format!("Failed to verify password: {}", e))
     }
 
-    async fn clear_failed_attempts(&self, username: &str) {
-        self.failed_attempts.write().await.remove(username);
-    }
-
-    pub async fn change_password(
+    /// 记录审计日志
+    async fn log_audit(
         &self,
+        event_type: &str,
         user_id: &str,
-        old_password: String,
-        new_password: String,
-    ) -> Result<()> {
-        let mut users = self.users.write().await;
-        let user = users.get_mut(user_id)
-            .ok_or_else(|| anyhow!("User not found"))?;
+        resource: &str,
+        action: &str,
+        status: &str,
+        details: &str,
+    ) -> Result<(), String> {
+        let log = AuditLog {
+            event_id: Uuid::new_v4().to_string(),
+            event_type: event_type.to_string(),
+            user_id: user_id.to_string(),
+            resource: resource.to_string(),
+            action: action.to_string(),
+            status: status.to_string(),
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            details: details.to_string(),
+        };
 
-        // 验证旧密码
-        if !argon2::verify_encoded(&user.password_hash, old_password.as_bytes())? {
-            return Err(anyhow!("Invalid old password"));
-        }
-
-        // 生成新密码哈希
-        let salt = rand::thread_rng().gen::<[u8; 32]>();
-        let config = Config::default();
-        let new_hash = argon2::hash_encoded(
-            new_password.as_bytes(),
-            &salt,
-            &config,
-        )?;
-
-        user.password_hash = new_hash;
-        info!("Password changed for user: {}", user_id);
-        Ok(())
-    }
-
-    pub async fn delete_user(&self, user_id: &str) -> Result<()> {
-        let mut users = self.users.write().await;
-        users.remove(user_id)
-            .ok_or_else(|| anyhow!("User not found"))?;
-        
-        info!("User deleted: {}", user_id);
-        Ok(())
+        self.audit_tx.send(log).await
+            .map_err(|e| format!("Failed to send audit log: {}", e))
     }
 }
 
@@ -225,60 +408,98 @@ impl AuthManager {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn test_user_registration_and_login() {
-        let auth = AuthManager::new(
+    async fn create_test_auth_manager() -> AuthManager {
+        let (tx, _) = mpsc::channel(100);
+        let metrics = Arc::new(MetricsCollector::new("test".to_string()));
+        
+        AuthManager::new(
             "test_secret".to_string(),
             Duration::from_secs(3600),
-            3,
-            Duration::from_secs(300),
-        );
-
-        // 注册用户
-        let user_id = auth.register_user(
-            "testuser".to_string(),
-            "password123".to_string(),
-            "user".to_string(),
-        ).await.expect("Failed to register user");
-
-        // 登录
-        let token = auth.login("testuser".to_string(), "password123".to_string())
-            .await
-            .expect("Failed to login");
-
-        // 验证token
-        let claims = auth.verify_token(&token)
-            .await
-            .expect("Failed to verify token");
-
-        assert_eq!(claims.sub, user_id);
-        assert_eq!(claims.role, "user");
+            metrics,
+            tx,
+        )
     }
 
     #[tokio::test]
-    async fn test_failed_login_attempts() {
-        let auth = AuthManager::new(
-            "test_secret".to_string(),
-            Duration::from_secs(3600),
-            3,
-            Duration::from_secs(300),
-        );
-
-        // 注册用户
-        auth.register_user(
-            "testuser2".to_string(),
+    async fn test_user_registration() {
+        let auth = create_test_auth_manager().await;
+        
+        let result = auth.register_user(
+            "test_user".to_string(),
             "password123".to_string(),
-            "user".to_string(),
-        ).await.expect("Failed to register user");
+            UserRole::User,
+        ).await;
 
-        // 尝试使用错误密码登录
-        for _ in 0..3 {
-            let result = auth.login("testuser2".to_string(), "wrongpassword".to_string()).await;
-            assert!(result.is_err());
-        }
+        assert!(result.is_ok());
+        let user = result.unwrap();
+        assert_eq!(user.username, "test_user");
+        assert_eq!(user.role, UserRole::User);
+    }
 
-        // 使用正确密码登录应该失败，因为账户已锁定
-        let result = auth.login("testuser2".to_string(), "password123".to_string()).await;
-        assert!(result.is_err());
+    #[tokio::test]
+    async fn test_user_login() {
+        let auth = create_test_auth_manager().await;
+        
+        // 注册用户
+        let user = auth.register_user(
+            "test_user".to_string(),
+            "password123".to_string(),
+            UserRole::User,
+        ).await.unwrap();
+
+        // 测试登录
+        let result = auth.login(
+            "test_user",
+            "password123",
+            "127.0.0.1".to_string(),
+            "test_agent".to_string(),
+        ).await;
+
+        assert!(result.is_ok());
+        let (session_id, token) = result.unwrap();
+        assert!(!session_id.is_empty());
+        assert!(!token.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_permission_check() {
+        let auth = create_test_auth_manager().await;
+        
+        // 注册管理员用户
+        let admin = auth.register_user(
+            "admin".to_string(),
+            "admin123".to_string(),
+            UserRole::Admin,
+        ).await.unwrap();
+
+        // 测试权限检查
+        let result = auth.check_permission(&admin.id, &Permission::Manage);
+        assert!(result.is_ok());
+        assert!(result.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_token_verification() {
+        let auth = create_test_auth_manager().await;
+        
+        // 注册用户并登录
+        let user = auth.register_user(
+            "test_user".to_string(),
+            "password123".to_string(),
+            UserRole::User,
+        ).await.unwrap();
+
+        let (_, token) = auth.login(
+            "test_user",
+            "password123",
+            "127.0.0.1".to_string(),
+            "test_agent".to_string(),
+        ).await.unwrap();
+
+        // 验证令牌
+        let result = auth.verify_token(&token);
+        assert!(result.is_ok());
+        let verified_user = result.unwrap();
+        assert_eq!(verified_user.id, user.id);
     }
 } 
