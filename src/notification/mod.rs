@@ -5,7 +5,7 @@ use anyhow::Result;
 
 pub struct NotificationManager {
     sender: mpsc::Sender<TaskResult>,
-    receiver: Arc<mpsc::Receiver<TaskResult>>,
+    receiver: mpsc::Receiver<TaskResult>,
     capacity: usize,
 }
 
@@ -14,7 +14,7 @@ impl NotificationManager {
         let (sender, receiver) = mpsc::channel(capacity);
         Self {
             sender,
-            receiver: Arc::new(receiver),
+            receiver,
             capacity,
         }
     }
@@ -24,7 +24,7 @@ impl NotificationManager {
         Ok(())
     }
 
-    pub async fn receive(&self) -> Option<TaskResult> {
-        self.receiver.as_ref().try_recv().ok()
+    pub async fn receive(&mut self) -> Option<TaskResult> {
+        self.receiver.recv().await
     }
 }

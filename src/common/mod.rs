@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 use std::time::Duration;
+use rand;
 
 pub mod object_store;
 
@@ -113,6 +114,8 @@ pub struct TaskRequiredResources {
     pub memory: Option<usize>,
     /// GPU数量
     pub gpu: Option<usize>,
+    /// 磁盘大小（字节）
+    pub disk_mb: Option<u64>,
 }
 
 impl Default for TaskRequiredResources {
@@ -121,6 +124,7 @@ impl Default for TaskRequiredResources {
             cpu: None,
             memory: None,
             gpu: None,
+            disk_mb: None,
         }
     }
 }
@@ -161,7 +165,7 @@ pub enum NodeType {
 }
 
 /// 工作节点资源信息
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct WorkerResources {
     /// CPU总核心数
     pub cpu_total: f64,
@@ -183,45 +187,48 @@ pub struct WorkerResources {
     pub network_bandwidth: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TaskSpec {
-    pub task_id: Uuid,
-    pub name: String,
-    pub priority: i32,
-    pub required_resources: TaskRequiredResources,
+impl Default for WorkerResources {
+    fn default() -> Self {
+        Self {
+            cpu_total: 0.0,
+            cpu_available: 0.0,
+            cpu_usage: 0.0,
+            memory_total: 0,
+            memory_available: 0,
+            memory_usage: 0.0,
+            gpu_total: 0,
+            gpu_available: 0,
+            network_bandwidth: 0.0,
+        }
+    }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TaskRequiredResources {
-    pub cpu_cores: u32,
-    pub memory_mb: u64,
-    pub disk_mb: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TaskResult {
-    pub task_id: Uuid,
-    pub status: TaskStatus,
-    pub result: Option<Vec<u8>>,
-    pub error: Option<String>,
-}
-
+/// 任务执行状态
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum TaskStatus {
+    /// 等待执行
     Pending,
+    /// 正在执行
     Running,
+    /// 执行完成
     Completed,
+    /// 执行失败
     Failed,
 }
 
+/// 矩阵类型用于计算
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Matrix {
+    /// 行数
     pub rows: usize,
+    /// 列数
     pub cols: usize,
+    /// 数据
     pub data: Vec<f64>,
 }
 
 impl Matrix {
+    /// 创建矩阵
     pub fn new(rows: usize, cols: usize) -> Self {
         Self {
             rows,
@@ -230,50 +237,12 @@ impl Matrix {
         }
     }
 
+    /// 随机生成矩阵
     pub fn random(rows: usize, cols: usize) -> Self {
         use rand::Rng;
         let mut rng = rand::thread_rng();
         let data = (0..rows * cols).map(|_| rng.gen()).collect();
         Self { rows, cols, data }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub enum NodeType {
-    Head,
-    Worker,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NodeInfo {
-    pub node_id: Uuid,
-    pub node_type: NodeType,
-    pub address: String,
-    pub port: u16,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum NodeHealth {
-    Healthy,
-    Unhealthy(String),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkerResources {
-    pub cpu_cores: u32,
-    pub memory_mb: u64,
-    pub disk_mb: u64,
-    pub network_bandwidth: f64,
-}
-
-impl Default for WorkerResources {
-    fn default() -> Self {
-        Self {
-            cpu_cores: num_cpus::get() as u32,
-            memory_mb: 1024 * 1024, // 1 GB
-            disk_mb: 1024 * 1024 * 10, // 10 GB
-            network_bandwidth: 1000.0, // 1 Gbps
-        }
     }
 }
 

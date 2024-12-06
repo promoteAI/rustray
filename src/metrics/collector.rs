@@ -3,6 +3,7 @@ use tokio::sync::RwLock;
 use std::collections::HashMap;
 use uuid::Uuid;
 use std::time::Instant;
+use anyhow::Result;
 
 #[derive(Debug, Clone)]
 pub struct TaskExecution {
@@ -41,23 +42,55 @@ impl MetricsCollector {
         }
     }
 
-    pub async fn record_metric(&self, name: &str, value: MetricType) {
+    pub async fn record_metric(&self, name: &str, value: MetricType) -> Result<()> {
         let mut metrics = self.metrics.write().await;
         metrics.insert(name.to_string(), value);
+        Ok(())
     }
 
-    pub async fn get_metric(&self, name: &str) -> Option<MetricType> {
+    pub async fn get_metric(&self, name: &str) -> Result<Option<MetricType>> {
         let metrics = self.metrics.read().await;
-        metrics.get(name).cloned()
+        Ok(metrics.get(name).cloned())
     }
 
-    pub async fn record_task_execution(&self, execution: TaskExecution) {
+    pub async fn increment_counter(&self, name: &str, value: u64) -> Result<()> {
+        let mut metrics = self.metrics.write().await;
+        let counter = metrics.entry(name.to_string())
+            .or_insert(MetricType::Counter(0.0));
+        
+        if let MetricType::Counter(ref mut count) = counter {
+            *count += value as f64;
+        }
+        
+        Ok(())
+    }
+
+    pub async fn set_gauge(&self, name: &str, value: f64) -> Result<()> {
+        let mut metrics = self.metrics.write().await;
+        metrics.insert(name.to_string(), MetricType::Gauge(value));
+        Ok(())
+    }
+
+    pub async fn record_histogram(&self, name: &str, value: f64) -> Result<()> {
+        let mut metrics = self.metrics.write().await;
+        let histogram = metrics.entry(name.to_string())
+            .or_insert(MetricType::Histogram(Vec::new()));
+        
+        if let MetricType::Histogram(ref mut values) = histogram {
+            values.push(value);
+        }
+        
+        Ok(())
+    }
+
+    pub async fn record_task_execution(&self, execution: TaskExecution) -> Result<()> {
         let mut executions = self.task_executions.write().await;
         executions.insert(execution.task_id, execution);
+        Ok(())
     }
 
-    pub async fn get_task_execution(&self, task_id: Uuid) -> Option<TaskExecution> {
+    pub async fn get_task_execution(&self, task_id: Uuid) -> Result<Option<TaskExecution>> {
         let executions = self.task_executions.read().await;
-        executions.get(&task_id).cloned()
+        Ok(executions.get(&task_id).cloned())
     }
 } 

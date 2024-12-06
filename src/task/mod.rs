@@ -7,6 +7,7 @@ use uuid::Uuid;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use anyhow;
 
 /// Task manager responsible for managing task lifecycle
 pub struct TaskManager {
@@ -61,23 +62,24 @@ impl TaskManager {
     }
 
     /// Set task result
-    pub async fn set_task_result(&self, result: TaskResult) -> Result<()> {
+    pub async fn set_task_result(&self, task_id: Uuid, result: TaskResult) -> Result<()> {
         let mut tasks = self.tasks.write().await;
         let mut results = self.results.write().await;
         
-        if !tasks.contains_key(&result.task_id) {
-            tracing::error!("Task {} not found", result.task_id);
+        if !tasks.contains_key(&task_id) {
+            tracing::error!("Task {} not found", task_id);
             return Err(RustRayError::TaskExecutionFailed(
-                format!("Task {} not found", result.task_id)
+                format!("Task {} not found", task_id)
             ));
         }
 
-        tracing::info!("Setting result for task {}", result.task_id);
-        tasks.insert(result.task_id, TaskStatus::Completed);
-        results.insert(result.task_id, result.clone());
+        tracing::info!("Setting result for task {}", task_id);
+        tasks.insert(task_id, TaskStatus::Completed);
+        results.insert(task_id, result.clone());
         
         // Send task completion notification
-        self.notification_manager.notify(result).await?;
+        self.notification_manager.notify(result).await
+            .map_err(|e| RustRayError::TaskExecutionFailed(e.to_string()))?;
         Ok(())
     }
 
