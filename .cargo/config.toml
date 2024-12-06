@@ -1,11 +1,12 @@
 [build]
-rustc-wrapper = "sccache"  # 如果安装了 sccache
-jobs = 8                   # 并行编译任务数，建议设置为 CPU 核心数
+jobs = 8  # 设置为CPU核心数
 
 [target.x86_64-unknown-linux-gnu]
 rustflags = [
     "-C", "target-cpu=native",
-    "-C", "link-arg=-fuse-ld=lld",  # 使用 lld 链接器
+    "-C", "opt-level=2",
+    "-C", "debuginfo=0",
+    "-C", "codegen-units=256",
 ]
 
 [cargo-new]
@@ -15,4 +16,4 @@ vcs = "git"
 git-fetch-with-cli = true   # 使用系统 git 而不是内置的
 
 [registries.crates-io]
-protocol = "sparse"  # 使用新的 sparse protocol 
+protocol = "sparse"
