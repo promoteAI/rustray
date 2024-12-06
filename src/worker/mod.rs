@@ -5,7 +5,7 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::common::{TaskSpec, TaskResult, TaskRequiredResources};
-use crate::error::{Result, RustRayError};
+use crate::error::Result;
 use crate::metrics::MetricsCollector;
 
 /// Worker node for executing tasks
@@ -89,7 +89,7 @@ impl WorkerNode {
     }
 
     /// Connect to head node
-    pub async fn connect_to_head(&self, head_addr: &str) -> Result<()> {
+    pub async fn connect_to_head(&self, _head_addr: &str) -> Result<()> {
         // TODO: Implement head node connection
         Ok(())
     }
