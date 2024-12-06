@@ -8,13 +8,14 @@
 //! - 审计日志
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH, Instant};
 use jsonwebtoken::{encode, decode, Header, Validation, EncodingKey, DecodingKey};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
+use futures_util::future::TryFutureExt;
 
 use crate::metrics::MetricsCollector;
 
@@ -30,73 +31,121 @@ pub enum UserRole {
 }
 
 /// 权限类型
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Permission {
-    /// 读取权限
-    Read,
-    /// 写入权限
-    Write,
-    /// 执行权限
-    Execute,
-    /// 管理权限
-    Manage,
+    ReadTask,
+    WriteTask,
+    ExecuteTask,
+    ManageUsers,
+    ManageSystem,
 }
 
 /// 用户信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
     /// 用户ID
-    pub id: String,
+    pub id: Uuid,
     /// 用户名
     pub username: String,
+    /// 邮箱
+    pub email: String,
     /// 密码哈希
     pub password_hash: String,
     /// 角色
     pub role: UserRole,
-    /// 权限列表
-    pub permissions: Vec<Permission>,
     /// 创建时间
-    pub created_at: u64,
+    pub created_at: SystemTime,
     /// 最后登录时间
-    pub last_login: Option<u64>,
+    pub last_login: Option<SystemTime>,
+}
+
+impl User {
+    pub fn new(
+        username: String,
+        email: String,
+        password: String,
+        role: UserRole,
+    ) -> Result<Self> {
+        let password_hash = bcrypt::hash(password.as_bytes(), bcrypt::DEFAULT_COST)
+            .map_err(|e| RustRayError::InternalError(e.to_string()))?;
+
+        Ok(Self {
+            id: Uuid::new_v4(),
+            username,
+            email,
+            password_hash,
+            role,
+            created_at: SystemTime::now(),
+            last_login: None,
+        })
+    }
+
+    pub fn verify_password(&self, password: &str) -> bool {
+        bcrypt::verify(password.as_bytes(), &self.password_hash)
+            .unwrap_or(false)
+    }
 }
 
 /// 会话信息
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Session {
     /// 会话ID
-    pub id: String,
+    pub id: Uuid,
     /// 用户ID
-    pub user_id: String,
+    pub user_id: Uuid,
     /// 创建时间
-    pub created_at: u64,
+    pub created_at: Instant,
     /// 过期时间
-    pub expires_at: u64,
+    pub expires_at: Instant,
     /// IP地址
     pub ip_address: String,
     /// 用户代理
     pub user_agent: String,
 }
 
+impl Session {
+    pub fn is_expired(&self) -> bool {
+        self.expires_at <= Instant::now()
+    }
+
+    pub fn extend_expiry(&mut self, duration: Duration) {
+        self.expires_at = Instant::now() + duration;
+    }
+}
+
 /// JWT声明
 #[derive(Debug, Serialize, Deserialize)]
-struct Claims {
-    /// 主题（用户ID）
-    sub: String,
-    /// 过期时间
-    exp: u64,
-    /// 发行时间
-    iat: u64,
-    /// 角色
-    role: UserRole,
+pub struct Claims {
+    pub sub: Uuid,           // Subject (User ID)
+    pub session_id: Uuid,    // Session ID
+    pub exp: u64,           // Expiration time
+    pub iat: u64,           // Issued at
+    pub iss: String,        // Issuer
+}
+
+impl Claims {
+    pub fn new(user_id: Uuid, session_id: Uuid, ttl: Duration) -> Self {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        Self {
+            sub: user_id,
+            session_id,
+            exp: now + ttl.as_secs(),
+            iat: now,
+            iss: "rustray".to_string(),
+        }
+    }
 }
 
 /// 认证管理器
 pub struct AuthManager {
     /// 用户映射
-    users: Arc<Mutex<HashMap<String, User>>>,
+    users: Arc<RwLock<HashMap<Uuid, User>>>,
     /// 会话映射
-    sessions: Arc<Mutex<HashMap<String, Session>>>,
+    sessions: Arc<RwLock<HashMap<Uuid, Session>>>,
     /// JWT密钥
     jwt_secret: String,
     /// 会话过期时间
@@ -137,8 +186,8 @@ impl AuthManager {
         audit_tx: mpsc::Sender<AuditLog>,
     ) -> Self {
         Self {
-            users: Arc::new(Mutex::new(HashMap::new())),
-            sessions: Arc::new(Mutex::new(HashMap::new())),
+            users: Arc::new(RwLock::new(HashMap::new())),
+            sessions: Arc::new(RwLock::new(HashMap::new())),
             jwt_secret,
             session_ttl,
             metrics,
@@ -162,15 +211,12 @@ impl AuthManager {
 
         // 创建用户
         let user = User {
-            id: Uuid::new_v4().to_string(),
+            id: Uuid::new_v4(),
             username,
+            email: "".to_string(),
             password_hash: Self::hash_password(&password)?,
-            role,
-            permissions: Self::get_default_permissions(&role),
-            created_at: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            role: role.clone(),
+            created_at: SystemTime::now(),
             last_login: None,
         };
 
@@ -189,6 +235,7 @@ impl AuthManager {
 
         // 更新指标
         self.metrics.increment_counter("auth.users.registered", 1)
+            .await
             .map_err(|e| e.to_string())?;
 
         Ok(user)
@@ -222,6 +269,7 @@ impl AuthManager {
             ).await?;
 
             self.metrics.increment_counter("auth.login.failed", 1)
+                .await
                 .map_err(|e| e.to_string())?;
 
             return Err("Invalid password".to_string());
@@ -236,22 +284,25 @@ impl AuthManager {
 
         // 创建会话
         let session = Session {
-            id: Uuid::new_v4().to_string(),
-            user_id: user.id.clone(),
-            created_at: now,
-            expires_at: now + self.session_ttl.as_secs(),
+            id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            created_at: Instant::now(),
+            expires_at: Instant::now() + self.session_ttl,
             ip_address,
             user_agent,
         };
 
-        // 生成JWT
+        // Clone the session ID before moving the session
+        let session_id = session.id;
+
+        // Insert the session into the sessions map
+        self.sessions.write().await
+            .insert(session_id, session);
+
+        // Generate a new token
         let token = self.generate_token(user)?;
 
-        // 保存会话
-        self.sessions.lock().map_err(|e| e.to_string())?
-            .insert(session.id.clone(), session);
-
-        // 记录审计日志
+        // 记录审��志
         self.log_audit(
             "login_success",
             &user.id,
@@ -263,9 +314,10 @@ impl AuthManager {
 
         // 更新指标
         self.metrics.increment_counter("auth.login.success", 1)
+            .await
             .map_err(|e| e.to_string())?;
 
-        Ok((session.id, token))
+        Ok((session_id, token))
     }
 
     /// 验证令牌
@@ -299,7 +351,7 @@ impl AuthManager {
 
     /// 注销会话
     pub async fn logout(&self, session_id: &str) -> Result<(), String> {
-        let mut sessions = self.sessions.lock().map_err(|e| e.to_string())?;
+        let mut sessions = self.sessions.write().await;
         
         if let Some(session) = sessions.remove(session_id) {
             // 记录审计日志
@@ -314,6 +366,7 @@ impl AuthManager {
 
             // 更新指标
             self.metrics.increment_counter("auth.logout", 1)
+                .await
                 .map_err(|e| e.to_string())?;
         }
 
@@ -333,7 +386,7 @@ impl AuthManager {
             sub: user.id.clone(),
             exp: now + self.session_ttl.as_secs(),
             iat: now,
-            role: user.role.clone(),
+            iss: "rustray".to_string(),
         };
 
         encode(
@@ -347,18 +400,19 @@ impl AuthManager {
     fn get_default_permissions(role: &UserRole) -> Vec<Permission> {
         match role {
             UserRole::Admin => vec![
-                Permission::Read,
-                Permission::Write,
-                Permission::Execute,
-                Permission::Manage,
+                Permission::ReadTask,
+                Permission::WriteTask,
+                Permission::ExecuteTask,
+                Permission::ManageUsers,
+                Permission::ManageSystem,
             ],
             UserRole::User => vec![
-                Permission::Read,
-                Permission::Write,
-                Permission::Execute,
+                Permission::ReadTask,
+                Permission::WriteTask,
+                Permission::ExecuteTask,
             ],
             UserRole::Guest => vec![
-                Permission::Read,
+                Permission::ReadTask,
             ],
         }
     }
@@ -404,102 +458,142 @@ impl AuthManager {
     }
 }
 
+pub trait HasPermissions {
+    fn has_permission(&self, permission: &Permission) -> bool;
+    fn has_any_permission(&self, permissions: &[Permission]) -> bool;
+    fn has_all_permissions(&self, permissions: &[Permission]) -> bool;
+}
+
+impl HasPermissions for User {
+    fn has_permission(&self, permission: &Permission) -> bool {
+        Permission::get_default_permissions(&self.role).contains(permission)
+    }
+
+    fn has_any_permission(&self, permissions: &[Permission]) -> bool {
+        let user_permissions = Permission::get_default_permissions(&self.role);
+        permissions.iter().any(|p| user_permissions.contains(p))
+    }
+
+    fn has_all_permissions(&self, permissions: &[Permission]) -> bool {
+        let user_permissions = Permission::get_default_permissions(&self.role);
+        permissions.iter().all(|p| user_permissions.contains(p))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metrics::collector::MetricsCollector;
 
-    async fn create_test_auth_manager() -> AuthManager {
-        let (tx, _) = mpsc::channel(100);
+    #[tokio::test]
+    async fn test_auth_flow() {
         let metrics = Arc::new(MetricsCollector::new("test".to_string()));
-        
-        AuthManager::new(
+        let auth = AuthService::new(
             "test_secret".to_string(),
             Duration::from_secs(3600),
             metrics,
-            tx,
-        )
-    }
+        );
 
-    #[tokio::test]
-    async fn test_user_registration() {
-        let auth = create_test_auth_manager().await;
-        
-        let result = auth.register_user(
-            "test_user".to_string(),
-            "password123".to_string(),
-            UserRole::User,
-        ).await;
-
-        assert!(result.is_ok());
-        let user = result.unwrap();
-        assert_eq!(user.username, "test_user");
-        assert_eq!(user.role, UserRole::User);
-    }
-
-    #[tokio::test]
-    async fn test_user_login() {
-        let auth = create_test_auth_manager().await;
-        
-        // 注册用户
+        // Test user registration
         let user = auth.register_user(
             "test_user".to_string(),
+            "test@example.com".to_string(),
             "password123".to_string(),
             UserRole::User,
         ).await.unwrap();
 
-        // 测试登录
-        let result = auth.login(
-            "test_user",
-            "password123",
+        assert_eq!(user.username, "test_user");
+        assert_eq!(user.role, UserRole::User);
+
+        // Test authentication
+        let authenticated = auth.authenticate_user("test_user", "password123").await.unwrap();
+        assert_eq!(authenticated.id, user.id);
+
+        // Test invalid password
+        let result = auth.authenticate_user("test_user", "wrong_password").await;
+        assert!(result.is_err());
+
+        // Test session creation
+        let (session_id, token) = auth.create_session(
+            user.id,
             "127.0.0.1".to_string(),
             "test_agent".to_string(),
-        ).await;
+        ).await.unwrap();
 
-        assert!(result.is_ok());
-        let (session_id, token) = result.unwrap();
-        assert!(!session_id.is_empty());
-        assert!(!token.is_empty());
+        // Test token validation
+        let session = auth.validate_token(&token).await.unwrap();
+        assert_eq!(session.id, session_id);
+        assert_eq!(session.user_id, user.id);
+
+        // Test permission check
+        assert!(auth.check_permission(user.id, &Permission::ReadTask).await.unwrap());
+        assert!(!auth.check_permission(user.id, &Permission::ManageUsers).await.unwrap());
+
+        // Test session invalidation
+        auth.invalidate_session(session_id).await.unwrap();
+        let result = auth.validate_token(&token).await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]
-    async fn test_permission_check() {
-        let auth = create_test_auth_manager().await;
-        
-        // 注册管理员用户
+    async fn test_admin_permissions() {
+        let metrics = Arc::new(MetricsCollector::new("test".to_string()));
+        let auth = AuthService::new(
+            "test_secret".to_string(),
+            Duration::from_secs(3600),
+            metrics,
+        );
+
+        // Create admin user
         let admin = auth.register_user(
             "admin".to_string(),
+            "admin@example.com".to_string(),
             "admin123".to_string(),
             UserRole::Admin,
         ).await.unwrap();
 
-        // 测试权限检查
-        let result = auth.check_permission(&admin.id, &Permission::Manage);
-        assert!(result.is_ok());
-        assert!(result.unwrap());
+        // Test admin permissions
+        assert!(auth.check_permission(admin.id, &Permission::ManageUsers).await.unwrap());
+        assert!(auth.check_permission(admin.id, &Permission::ManageSystem).await.unwrap());
     }
 
     #[tokio::test]
-    async fn test_token_verification() {
-        let auth = create_test_auth_manager().await;
-        
-        // 注册用户并登录
+    async fn test_user_management() {
+        let metrics = Arc::new(MetricsCollector::new("test".to_string()));
+        let auth = AuthService::new(
+            "test_secret".to_string(),
+            Duration::from_secs(3600),
+            metrics,
+        );
+
+        // Create user
         let user = auth.register_user(
             "test_user".to_string(),
+            "test@example.com".to_string(),
             "password123".to_string(),
             UserRole::User,
         ).await.unwrap();
 
-        let (_, token) = auth.login(
-            "test_user",
-            "password123",
-            "127.0.0.1".to_string(),
-            "test_agent".to_string(),
+        // Update user
+        let updated = auth.update_user(
+            user.id,
+            Some("new@example.com".to_string()),
+            Some("newpassword".to_string()),
+            Some(UserRole::Admin),
         ).await.unwrap();
 
-        // 验证令牌
-        let result = auth.verify_token(&token);
+        assert_eq!(updated.email, "new@example.com");
+        assert_eq!(updated.role, UserRole::Admin);
+
+        // Test new password
+        let result = auth.authenticate_user("test_user", "newpassword").await;
         assert!(result.is_ok());
-        let verified_user = result.unwrap();
-        assert_eq!(verified_user.id, user.id);
+
+        // Delete user
+        auth.delete_user(user.id).await.unwrap();
+
+        // Try to get deleted user
+        let result = auth.get_user(user.id).await;
+        assert!(result.is_err());
     }
 } 

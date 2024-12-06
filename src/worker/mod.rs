@@ -46,7 +46,7 @@ impl WorkerNode {
 
     pub async fn submit_task(&self, task: TaskSpec) -> Result<()> {
         let mut tasks = self.running_tasks.write().await;
-        tasks.insert(task.task_id.clone(), RunningTask {
+        tasks.insert(task.task_id.to_string(), RunningTask {
             spec: task,
             start_time: Instant::now(),
             resources: TaskRequiredResources::default(),

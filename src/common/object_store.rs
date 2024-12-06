@@ -7,11 +7,10 @@
 //! - 高效的存储引擎
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Mutex, Arc};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
 use uuid::Uuid;
+use crate::metrics::MetricsCollector;
 
 /// 存储引擎接口
 pub trait StorageEngine: Send + Sync {
@@ -65,7 +64,7 @@ struct VersionInfo {
 }
 
 /// 分布式事务
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Transaction {
     id: String,
     start_ts: u64,

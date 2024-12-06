@@ -7,7 +7,6 @@ use uuid::Uuid;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use anyhow;
 
 /// Task manager responsible for managing task lifecycle
 pub struct TaskManager {
@@ -35,7 +34,7 @@ impl TaskManager {
         
         if tasks.contains_key(&task.task_id) {
             tracing::warn!("Task {} already exists", task.task_id);
-            return Err(RustRayError::TaskExecutionFailed(
+            return Err(RustRayError::TaskError(
                 format!("Task {} already exists", task.task_id)
             ));
         }
@@ -51,7 +50,7 @@ impl TaskManager {
         
         if !tasks.contains_key(&task_id) {
             tracing::error!("Task {} not found", task_id);
-            return Err(RustRayError::TaskExecutionFailed(
+            return Err(RustRayError::TaskError(
                 format!("Task {} not found", task_id)
             ));
         }
@@ -68,7 +67,7 @@ impl TaskManager {
         
         if !tasks.contains_key(&task_id) {
             tracing::error!("Task {} not found", task_id);
-            return Err(RustRayError::TaskExecutionFailed(
+            return Err(RustRayError::TaskError(
                 format!("Task {} not found", task_id)
             ));
         }
@@ -79,7 +78,7 @@ impl TaskManager {
         
         // Send task completion notification
         self.notification_manager.notify(result).await
-            .map_err(|e| RustRayError::TaskExecutionFailed(e.to_string()))?;
+            .map_err(|e| RustRayError::TaskError(e.to_string()))?;
         Ok(())
     }
 
@@ -89,7 +88,7 @@ impl TaskManager {
         
         tasks.get(&task_id)
             .copied()
-            .ok_or_else(|| RustRayError::TaskExecutionFailed(
+            .ok_or_else(|| RustRayError::TaskError(
                 format!("Task {} not found", task_id)
             ))
     }

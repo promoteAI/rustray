@@ -15,18 +15,13 @@ use rand;
 
 pub mod object_store;
 
-/// 任务优先级
+/// Task priority levels
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TaskPriority {
-    /// 关键任务，最高优先级
     Critical,
-    /// 高优先级任务
     High,
-    /// 普通任务（默认）
     Normal,
-    /// 低优先级任务
     Low,
-    /// 后台任务，最低优先级
     Background,
 }
 
@@ -36,56 +31,37 @@ impl Default for TaskPriority {
     }
 }
 
-/// 任务重试策略
+/// Task execution status
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum TaskStatus {
+    Pending,
+    Running,
+    Completed,
+    Failed,
+}
+
+/// Task execution result
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RetryStrategy {
-    /// 最大重试次数
-    pub max_attempts: usize,
-    /// 初始重试延迟
-    pub initial_delay: Duration,
-    /// 最大重试延迟
-    pub max_delay: Duration,
-    /// 退避因子（每次重试后延迟时间的增长倍数）
-    pub backoff_factor: f64,
-    /// 可重试的错误类型列表
-    pub retry_on_errors: Vec<String>,
+pub enum TaskResult {
+    Running,
+    Completed(Vec<u8>),
+    Failed(String)
 }
 
-impl Default for RetryStrategy {
-    fn default() -> Self {
-        Self {
-            max_attempts: 3,
-            initial_delay: Duration::from_secs(1),
-            max_delay: Duration::from_secs(60),
-            backoff_factor: 2.0,
-            retry_on_errors: vec![],
-        }
-    }
-}
-
-/// 任务规范
+/// Task specification
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskSpec {
-    /// 任务唯一标识符
     pub task_id: Uuid,
-    /// 要执行的函数名
     pub function_name: String,
-    /// 函数参数（序列化后的字节数组）
     pub args: Vec<Vec<u8>>,
-    /// 函数关键字参数
     pub kwargs: HashMap<String, String>,
-    /// 任务优先级
     pub priority: Option<TaskPriority>,
-    /// 所需资源
     pub required_resources: TaskRequiredResources,
-    /// 执行超时时间
     pub timeout: Option<Duration>,
-    /// 重试策略
     pub retry_strategy: Option<RetryStrategy>,
-    /// 工作流ID（如果任务属于工作流）
     pub workflow_id: Option<String>,
-    /// 缓存键（用于结果复用）
     pub cache_key: Option<String>,
+    pub input_data: Vec<String>,
 }
 
 impl Default for TaskSpec {
@@ -101,21 +77,68 @@ impl Default for TaskSpec {
             retry_strategy: None,
             workflow_id: None,
             cache_key: None,
+            input_data: Vec::new(),
         }
     }
 }
 
-/// 任务所需资源
+/// Required resources for a task
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskRequiredResources {
-    /// CPU核心数
     pub cpu: Option<f64>,
-    /// 内存大小（字节）
     pub memory: Option<usize>,
-    /// GPU数量
     pub gpu: Option<usize>,
-    /// 磁盘大小（字节）
     pub disk_mb: Option<u64>,
+}
+
+impl TaskRequiredResources {
+    pub fn can_fit(&self, available: &TaskRequiredResources) -> bool {
+        // Check CPU requirements
+        if let Some(req_cpu) = self.cpu {
+            if let Some(avail_cpu) = available.cpu {
+                if req_cpu > avail_cpu {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+
+        // Check memory requirements
+        if let Some(req_mem) = self.memory {
+            if let Some(avail_mem) = available.memory {
+                if req_mem > avail_mem {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+
+        // Check GPU requirements
+        if let Some(req_gpu) = self.gpu {
+            if let Some(avail_gpu) = available.gpu {
+                if req_gpu > avail_gpu {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+
+        // Check disk requirements
+        if let Some(req_disk) = self.disk_mb {
+            if let Some(avail_disk) = available.disk_mb {
+                if req_disk > avail_disk {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+
+        true
+    }
 }
 
 impl Default for TaskRequiredResources {
@@ -129,61 +152,55 @@ impl Default for TaskRequiredResources {
     }
 }
 
-/// 任务执行结果
+/// Retry strategy for failed tasks
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum TaskResult {
-    /// 等待执行
-    Pending,
-    /// 正在执行
-    Running,
-    /// 执行完成，包含结果数据
-    Completed(Vec<u8>),
-    /// 执行失败，包含错误信息
-    Failed(String),
+pub struct RetryStrategy {
+    pub max_attempts: usize,
+    pub initial_delay: Duration,
+    pub max_delay: Duration,
+    pub backoff_factor: f64,
+    pub retry_on_errors: Vec<String>,
 }
 
-/// 节点信息
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NodeInfo {
-    /// 节点唯一标识符
-    pub node_id: Uuid,
-    /// 节点类型（头节点或工作节点
-    pub node_type: NodeType,
-    /// 节点地址
-    pub address: String,
-    /// 节点端口
-    pub port: u16,
+impl Default for RetryStrategy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 3,
+            initial_delay: Duration::from_secs(1),
+            max_delay: Duration::from_secs(60),
+            backoff_factor: 2.0,
+            retry_on_errors: vec![],
+        }
+    }
 }
 
-/// 节点类型
+/// Node type (Head or Worker)
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum NodeType {
-    /// 头节点，负责调度和管理
     Head,
-    /// 工作节点，负责执行任务
     Worker,
 }
 
-/// 工作节点资源信息
+/// Node information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeInfo {
+    pub node_id: Uuid,
+    pub node_type: NodeType,
+    pub address: String,
+    pub port: u16,
+}
+
+/// Worker node resources
 #[derive(Debug, Clone)]
 pub struct WorkerResources {
-    /// CPU总核心数
     pub cpu_total: f64,
-    /// 可用CPU核心数
     pub cpu_available: f64,
-    /// CPU使用率
     pub cpu_usage: f64,
-    /// 总内存大小（字节）
     pub memory_total: usize,
-    /// 可用内存大小（字节）
     pub memory_available: usize,
-    /// 内存使用率
     pub memory_usage: f64,
-    /// GPU总数量
     pub gpu_total: usize,
-    /// 可用GPU数量
     pub gpu_available: usize,
-    /// 网络带宽（Mbps）
     pub network_bandwidth: f64,
 }
 
@@ -203,32 +220,15 @@ impl Default for WorkerResources {
     }
 }
 
-/// 任务执行状态
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub enum TaskStatus {
-    /// 等待执行
-    Pending,
-    /// 正在执行
-    Running,
-    /// 执行完成
-    Completed,
-    /// 执行失败
-    Failed,
-}
-
-/// 矩阵类型用于计算
+/// Matrix type for computations
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Matrix {
-    /// 行数
     pub rows: usize,
-    /// 列数
     pub cols: usize,
-    /// 数据
     pub data: Vec<f64>,
 }
 
 impl Matrix {
-    /// 创建矩阵
     pub fn new(rows: usize, cols: usize) -> Self {
         Self {
             rows,
@@ -237,7 +237,6 @@ impl Matrix {
         }
     }
 
-    /// 随机生成矩阵
     pub fn random(rows: usize, cols: usize) -> Self {
         use rand::Rng;
         let mut rng = rand::thread_rng();

@@ -1,10 +1,11 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use uuid::Uuid;
-use anyhow::Result;
 
 use crate::common::{TaskSpec, TaskStatus};
 use crate::metrics::collector::MetricsCollector;
+use crate::error::{Result, RustRayError};
 
 pub struct TaskGraph {
     tasks: Arc<RwLock<HashMap<Uuid, TaskSpec>>>,
@@ -23,10 +24,10 @@ impl TaskGraph {
         }
     }
 
-    pub fn add_task(&self, task: TaskSpec, deps: Vec<Uuid>) -> Result<()> {
-        let mut tasks = self.tasks.write().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
-        let mut dependencies = self.dependencies.write().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
-        let mut status = self.status.write().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+    pub async fn add_task(&self, task: TaskSpec, deps: Vec<Uuid>) -> Result<()> {
+        let mut tasks = self.tasks.write().await;
+        let mut dependencies = self.dependencies.write().await;
+        let mut status = self.status.write().await;
 
         tasks.insert(task.task_id, task);
         dependencies.insert(task.task_id, deps.into_iter().collect());
@@ -35,40 +36,45 @@ impl TaskGraph {
         Ok(())
     }
 
-    pub fn get_ready_tasks(&self) -> Result<Vec<TaskSpec>> {
-        let tasks = self.tasks.read().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
-        let dependencies = self.dependencies.read().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
-        let status = self.status.read().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+    pub async fn get_ready_tasks(&self) -> Result<Vec<TaskSpec>> {
+        let tasks = self.tasks.read().await;
+        let dependencies = self.dependencies.read().await;
+        let status = self.status.read().await;
 
-        let ready_tasks = tasks.iter()
-            .filter(|(id, _)| {
-                // Task is pending and all dependencies are completed
-                matches!(status.get(id), Some(TaskStatus::Pending)) &&
-                dependencies.get(id)
-                    .map(|deps| deps.iter().all(|dep_id| 
-                        matches!(status.get(dep_id), Some(TaskStatus::Completed))
-                    ))
-                    .unwrap_or(true)
-            })
-            .map(|(_, task)| task.clone())
-            .collect();
+        let mut ready_tasks = Vec::new();
+
+        for (task_id, task) in tasks.iter() {
+            if status.get(task_id) == Some(&TaskStatus::Pending) {
+                let deps = dependencies.get(task_id).unwrap_or(&HashSet::new());
+                let all_deps_completed = deps.iter().all(|dep_id| {
+                    status.get(dep_id) == Some(&TaskStatus::Completed)
+                });
+
+                if all_deps_completed {
+                    ready_tasks.push(task.clone());
+                }
+            }
+        }
 
         Ok(ready_tasks)
     }
 
-    pub fn update_task_status(&self, task_id: Uuid, new_status: TaskStatus) -> Result<()> {
-        let mut status = self.status.write().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
-        status.insert(task_id, new_status);
-        Ok(())
+    pub async fn update_task_status(&self, task_id: Uuid, new_status: TaskStatus) -> Result<()> {
+        let mut status = self.status.write().await;
+
+        if let Some(current_status) = status.get_mut(&task_id) {
+            *current_status = new_status;
+            Ok(())
+        } else {
+            Err(RustRayError::TaskError(format!("Task {} not found", task_id)))
+        }
     }
 
-    pub fn get_task_status(&self, task_id: &Uuid) -> Result<Option<TaskStatus>> {
-        let status = self.status.read().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
-        Ok(status.get(task_id).copied())
-    }
+    pub async fn get_task_status(&self, task_id: Uuid) -> Result<TaskStatus> {
+        let status = self.status.read().await;
 
-    pub fn get_task(&self, task_id: &Uuid) -> Result<Option<TaskSpec>> {
-        let tasks = self.tasks.read().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
-        Ok(tasks.get(task_id).cloned())
+        status.get(&task_id)
+            .cloned()
+            .ok_or_else(|| RustRayError::TaskError(format!("Task {} not found", task_id)))
     }
 } 

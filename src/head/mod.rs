@@ -8,113 +8,77 @@
 //! - 性能监控和优化
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 use tracing::{error, info, warn};
 use uuid::Uuid;
-use futures_util::future::TryFutureExt;
 
 use crate::common::{
-    NodeInfo, NodeType, TaskSpec, TaskResult, TaskRequiredResources,
+    NodeInfo, NodeType, TaskSpec, TaskStatus, TaskRequiredResources,
     object_store::ObjectStore,
 };
 use crate::metrics::collector::MetricsCollector;
-use crate::scheduler::load_balancer::{LoadBalancer, LoadBalanceStrategy};
-use crate::scheduler::task_graph::TaskGraph;
-use crate::scheduler::NodeHealth;
-use anyhow::Result;
+use crate::scheduler::{LoadBalancer, LoadBalanceStrategy, TaskGraph, NodeHealth};
+use crate::error::{Result, RustRayError};
 
-/// 头节点配置
+/// Head node configuration
 #[derive(Debug, Clone)]
 pub struct HeadNodeConfig {
-    /// 节点地址
     pub address: String,
-    /// 节点端口
     pub port: u16,
-    /// 心跳超时时间
     pub heartbeat_timeout: Duration,
-    /// 资源监控间隔
     pub resource_monitor_interval: Duration,
-    /// 调度策略
     pub scheduling_strategy: LoadBalanceStrategy,
 }
 
-/// 头节点状态
+/// Head node state
 #[derive(Debug, Clone, PartialEq)]
 pub enum HeadNodeState {
-    /// 初始化中
     Initializing,
-    /// 运行中
     Running,
-    /// 降级模式
     Degraded(String),
-    /// 关闭中
     ShuttingDown,
-    /// 已关闭
     Shutdown,
-    /// 错误状态
     Error(String),
 }
 
-/// 集群状态
+/// Cluster status
 #[derive(Debug, Clone)]
 pub struct ClusterStatus {
-    /// 总节点数
     pub total_nodes: usize,
-    /// 活跃节点数
     pub active_nodes: usize,
-    /// 总任务数
     pub total_tasks: usize,
-    /// 运行中的任务数
     pub running_tasks: usize,
-    /// 等待中的任务数
     pub pending_tasks: usize,
-    /// CPU使用率
     pub cpu_usage: f64,
-    /// 内存使用量
     pub memory_usage: usize,
 }
 
-/// 头节点
+/// Head node
 pub struct HeadNode {
-    /// 节点信息
     pub node_info: NodeInfo,
-    /// 节点配置
     config: HeadNodeConfig,
-    /// 节点状态
-    state: Arc<Mutex<HeadNodeState>>,
-    /// 工作节点映射
-    workers: Arc<Mutex<HashMap<Uuid, WorkerInfo>>>,
-    /// 任务图
+    state: Arc<RwLock<HeadNodeState>>,
+    workers: Arc<RwLock<HashMap<Uuid, WorkerInfo>>>,
     task_graph: Arc<TaskGraph>,
-    /// 负载均衡器
     load_balancer: Arc<LoadBalancer>,
-    /// 对象存储
     object_store: Arc<ObjectStore>,
-    /// 指标收集器
     metrics: Arc<MetricsCollector>,
-    /// 状态更新通道
     status_tx: mpsc::Sender<ClusterStatus>,
-    /// 后台任务句柄
-    background_tasks: Vec<tokio::task::JoinHandle<()>>,
+    background_tasks: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>>,
 }
 
-/// 工作节点信息
+/// Worker node information
 #[derive(Debug, Clone)]
 struct WorkerInfo {
-    /// 节点信息
     node_info: NodeInfo,
-    /// 最后心跳时间
     last_heartbeat: Instant,
-    /// 资源使用情况
     resources: TaskRequiredResources,
-    /// 运行中的任务数
     running_tasks: usize,
 }
 
 impl HeadNode {
-    /// 创建新的头节点
     pub fn new(
         config: HeadNodeConfig,
         object_store: Arc<ObjectStore>,
@@ -129,7 +93,6 @@ impl HeadNode {
         };
 
         let task_graph = Arc::new(TaskGraph::new(metrics.clone()));
-
         let load_balancer = Arc::new(LoadBalancer::new(
             config.scheduling_strategy.clone(),
             metrics.clone(),
@@ -138,59 +101,48 @@ impl HeadNode {
         Self {
             node_info,
             config,
-            state: Arc::new(Mutex::new(HeadNodeState::Initializing)),
-            workers: Arc::new(Mutex::new(HashMap::new())),
+            state: Arc::new(RwLock::new(HeadNodeState::Initializing)),
+            workers: Arc::new(RwLock::new(HashMap::new())),
             task_graph,
             load_balancer,
             object_store,
             metrics,
             status_tx,
-            background_tasks: Vec::new(),
+            background_tasks: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
-    /// 启动头节点
-    pub async fn start(&mut self) -> Result<()> {
+    pub async fn start(&self) -> Result<()> {
         info!("Starting head node: {}", self.node_info.node_id);
 
-        // 启动心跳检查服务
-        self.start_heartbeat_checker()?;
+        self.start_heartbeat_checker().await?;
+        self.start_resource_monitor().await?;
+        self.start_scheduler().await?;
 
-        // 启动资源监控服务
-        self.start_resource_monitor()?;
-
-        // 启动调度服务
-        self.start_scheduler()?;
-
-        // 更新节点状态
-        *self.state.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))? = HeadNodeState::Running;
+        *self.state.write().await = HeadNodeState::Running;
         
         self.update_status().await?;
         info!("Head node started successfully");
         Ok(())
     }
 
-    /// 停止头节点
-    pub async fn stop(&mut self) -> Result<()> {
+    pub async fn stop(&self) -> Result<()> {
         info!("Stopping head node: {}", self.node_info.node_id);
 
-        // 更新状态为关闭中
-        *self.state.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))? = HeadNodeState::ShuttingDown;
+        *self.state.write().await = HeadNodeState::ShuttingDown;
 
-        // 停止所有后台任务
-        for task in self.background_tasks.drain(..) {
+        let mut tasks = self.background_tasks.write().await;
+        for task in tasks.drain(..) {
             task.abort();
         }
 
-        // 更新状态为已关闭
-        *self.state.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))? = HeadNodeState::Shutdown;
+        *self.state.write().await = HeadNodeState::Shutdown;
         
         self.update_status().await?;
         info!("Head node stopped successfully");
         Ok(())
     }
 
-    /// 注册工作节点
     pub async fn register_worker(&self, worker: NodeInfo) -> Result<()> {
         info!("Registering worker node: {}", worker.node_id);
 
@@ -201,36 +153,34 @@ impl HeadNode {
             running_tasks: 0,
         };
 
-        // 添加到工作节点列表
-        self.workers.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?
+        self.workers.write().await
             .insert(worker.node_id, worker_info);
 
-        // 注册到负载均衡器
-        self.load_balancer.register_node(worker)?;
+        self.load_balancer.register_node(worker)
+            .map_err(|e| RustRayError::InternalError(e.to_string()))?;
 
-        // 更新指标
-        self.metrics.increment_counter("head.workers.registered", 1).await?;
+        self.metrics.increment_counter("head.workers.registered", 1).await
+            .map_err(|e| RustRayError::InternalError(e.to_string()))?;
 
         self.update_status().await?;
         info!("Worker node registered successfully");
         Ok(())
     }
 
-    /// 提交任务
     pub async fn submit_task(&self, task: TaskSpec) -> Result<()> {
         info!("Submitting task: {}", task.task_id);
 
-        // 添加到任务图
-        self.task_graph.add_task(task.clone(), vec![])?;
+        self.task_graph.add_task(task.clone(), vec![]).await
+            .map_err(|e| RustRayError::TaskError(e.to_string()))?;
 
-        // 选择工作节点
         if let Some(worker_id) = self.load_balancer.select_node(&task) {
-            let workers = self.workers.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
-            if let Some(worker) = workers.get(&worker_id) {
-                // TODO: 实现任务发送逻辑
+            let workers = self.workers.read().await;
                 
-                // 更新指标
-                self.metrics.increment_counter("head.tasks.submitted", 1).await?;
+            if let Some(worker) = workers.get(&worker_id) {
+                // TODO: Implement task sending logic
+                
+                self.metrics.increment_counter("head.tasks.submitted", 1).await
+                    .map_err(|e| RustRayError::InternalError(e.to_string()))?;
             }
         }
 
@@ -238,55 +188,30 @@ impl HeadNode {
         Ok(())
     }
 
-    /// 更新工作节点心跳
     pub async fn update_worker_heartbeat(
         &self,
         worker_id: Uuid,
         resources: TaskRequiredResources,
     ) -> Result<()> {
-        let mut workers = self.workers.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+        let mut workers = self.workers.write().await;
         
         if let Some(worker) = workers.get_mut(&worker_id) {
             worker.last_heartbeat = Instant::now();
             worker.resources = resources;
 
-            // 更新负载均衡器中的节点状态
-            self.load_balancer.update_node_health(
-                worker_id,
-                NodeHealth::Healthy,
-            )?;
+            self.load_balancer.update_node_health(worker_id, NodeHealth::Healthy)
+                .map_err(|e| RustRayError::InternalError(e.to_string()))?;
 
-            // 更新指标
-            self.metrics.increment_counter("head.heartbeats.received", 1).await?;
+            self.metrics.increment_counter("head.heartbeats.received", 1).await
+                .map_err(|e| RustRayError::InternalError(e.to_string()))?;
         }
 
         self.update_status().await?;
         Ok(())
     }
 
-    // 私有辅助方法
-
-    /// 启动心跳检查服务
-    fn start_heartbeat_checker(&self) -> Result<()> {
-        // TODO: Implement heartbeat checker
-        Ok(())
-    }
-
-    /// 启动资源监控服务
-    fn start_resource_monitor(&self) -> Result<()> {
-        // TODO: Implement resource monitor
-        Ok(())
-    }
-
-    /// 启动调度服务
-    fn start_scheduler(&self) -> Result<()> {
-        // TODO: Implement scheduler
-        Ok(())
-    }
-
-    /// 更新集群状态
     async fn update_status(&self) -> Result<()> {
-        let workers = self.workers.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+        let workers = self.workers.read().await;
         
         let status = ClusterStatus {
             total_nodes: workers.len(),
@@ -301,7 +226,133 @@ impl HeadNode {
         };
 
         self.status_tx.send(status).await
-            .map_err(|e| anyhow::anyhow!("Failed to send status: {}", e))?;
+            .map_err(|e| RustRayError::CommunicationError(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn start_heartbeat_checker(&self) -> Result<()> {
+        let state = self.state.clone();
+        let workers = self.workers.clone();
+        let load_balancer = self.load_balancer.clone();
+        let metrics = self.metrics.clone();
+        let timeout = self.config.heartbeat_timeout;
+
+        let handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(timeout);
+            loop {
+                interval.tick().await;
+                
+                if *state.read().await == HeadNodeState::ShuttingDown {
+                    break;
+                }
+
+                let mut workers = workers.write().await;
+                let now = Instant::now();
+                let mut to_remove = Vec::new();
+
+                for (worker_id, info) in workers.iter() {
+                    if now.duration_since(info.last_heartbeat) >= timeout {
+                        to_remove.push(*worker_id);
+                    }
+                }
+
+                for worker_id in to_remove {
+                    workers.remove(&worker_id);
+                    if let Err(e) = load_balancer.update_node_health(
+                        worker_id,
+                        NodeHealth::Unhealthy("Heartbeat timeout".to_string()),
+                    ) {
+                        error!("Failed to update node health: {}", e);
+                    }
+
+                    if let Err(e) = metrics.increment_counter("head.workers.timeout", 1).await {
+                        error!("Failed to update metrics: {}", e);
+                    }
+                }
+            }
+        });
+
+        self.background_tasks.write().await.push(handle);
+        Ok(())
+    }
+
+    async fn start_resource_monitor(&self) -> Result<()> {
+        let state = self.state.clone();
+        let workers = self.workers.clone();
+        let metrics = self.metrics.clone();
+        let interval = self.config.resource_monitor_interval;
+
+        let handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(interval);
+            loop {
+                interval.tick().await;
+                
+                if *state.read().await == HeadNodeState::ShuttingDown {
+                    break;
+                }
+
+                let workers = workers.read().await;
+                let mut total_cpu = 0.0;
+                let mut total_memory = 0;
+                let mut active_workers = 0;
+
+                for worker in workers.values() {
+                    if let Some(cpu) = worker.resources.cpu {
+                        total_cpu += cpu;
+                    }
+                    if let Some(memory) = worker.resources.memory {
+                        total_memory += memory;
+                    }
+                    active_workers += 1;
+                }
+
+                if active_workers > 0 {
+                    let avg_cpu = total_cpu / active_workers as f64;
+                    let avg_memory = total_memory / active_workers;
+
+                    if let Err(e) = metrics.set_gauge("head.cluster.cpu_usage", avg_cpu).await {
+                        error!("Failed to update CPU metrics: {}", e);
+                    }
+                    if let Err(e) = metrics.set_gauge("head.cluster.memory_usage", avg_memory as f64).await {
+                        error!("Failed to update memory metrics: {}", e);
+                    }
+                }
+            }
+        });
+
+        self.background_tasks.write().await.push(handle);
+        Ok(())
+    }
+
+    async fn start_scheduler(&self) -> Result<()> {
+        let state = self.state.clone();
+        let task_graph = self.task_graph.clone();
+        let load_balancer = self.load_balancer.clone();
+        let metrics = self.metrics.clone();
+
+        let handle = tokio::spawn(async move {
+            loop {
+                if *state.read().await == HeadNodeState::ShuttingDown {
+                    break;
+                }
+
+                // Get next ready task
+                if let Ok(ready_tasks) = task_graph.get_ready_tasks().await {
+                    for task in ready_tasks {
+                        if let Some(worker_id) = load_balancer.select_node(&task) {
+                            // TODO: Implement task dispatch logic
+                            if let Err(e) = metrics.increment_counter("head.tasks.scheduled", 1).await {
+                                error!("Failed to update metrics: {}", e);
+                            }
+                        }
+                    }
+                }
+
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        });
+
+        self.background_tasks.write().await.push(handle);
         Ok(())
     }
 }
@@ -334,7 +385,7 @@ mod tests {
         );
 
         assert_eq!(
-            *head.state.lock().unwrap(),
+            *head.state.read().await,
             HeadNodeState::Initializing
         );
     }
@@ -362,7 +413,7 @@ mod tests {
         let result = head.register_worker(worker.clone()).await;
         assert!(result.is_ok());
         
-        let workers = head.workers.lock().unwrap();
+        let workers = head.workers.read().await;
         assert_eq!(workers.len(), 1);
         assert!(workers.contains_key(&worker.node_id));
     }
