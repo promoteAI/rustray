@@ -26,8 +26,9 @@ impl LoadBalancer {
         let mut nodes = self.nodes.write().await;
         let mut health = self.node_health.write().await;
         
-        nodes.insert(node.node_id, node);
-        health.insert(node.node_id, NodeHealth::Healthy);
+        let node_id = node.node_id;
+        nodes.insert(node_id, node);
+        health.insert(node_id, NodeHealth::Healthy);
         
         Ok(())
     }
