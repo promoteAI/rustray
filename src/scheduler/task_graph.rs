@@ -7,11 +7,12 @@
 //! - 并行执行调度
 //! - 故障恢复和重试
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque, BinaryHeap};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
+use std::cmp::Ordering;
 
 use crate::common::{TaskPriority, TaskSpec, TaskResult};
 use crate::metrics::MetricsCollector;
@@ -46,6 +47,36 @@ pub struct TaskNode {
     pub retry_count: usize,
     /// 最后一次执行结果
     pub last_result: Option<TaskResult>,
+}
+
+/// 任务优先级队列中的元素
+#[derive(Debug, Clone)]
+struct PrioritizedTask {
+    priority: i32,
+    timestamp: u64,
+    task: TaskSpec,
+}
+
+impl Eq for PrioritizedTask {}
+
+impl PartialEq for PrioritizedTask {
+    fn eq(&self, other: &Self) -> bool {
+        self.priority == other.priority && self.timestamp == other.timestamp
+    }
+}
+
+impl PartialOrd for PrioritizedTask {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PrioritizedTask {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // 优先级高的排在前面
+        other.priority.cmp(&self.priority)
+            .then_with(|| self.timestamp.cmp(&other.timestamp))
+    }
 }
 
 /// 任务图管理器
@@ -303,6 +334,160 @@ impl TaskGraph {
         
         Ok(())
     }
+
+    // 添加任务批处理功能
+    pub fn batch_add_tasks(&self, tasks: Vec<TaskSpec>) -> Result<(), String> {
+        let mut nodes = self.nodes.lock().map_err(|e| e.to_string())?;
+        let mut ready_queue = self.ready_queue.lock().map_err(|e| e.to_string())?;
+        
+        for task in tasks {
+            let task_id = task.task_id.clone();
+            let node = TaskNode {
+                task,
+                state: TaskState::Ready,
+                dependencies: HashSet::new(),
+                dependents: HashSet::new(),
+                retry_count: 0,
+                last_result: None,
+            };
+            
+            nodes.insert(task_id.clone(), node);
+            ready_queue.push_back(task_id);
+        }
+        
+        self.metrics.increment_counter("task_graph.tasks.batch_added", tasks.len() as u64)
+            .map_err(|e| e.to_string())?;
+            
+        Ok(())
+    }
+
+    // 添加任务恢复功能
+    pub fn recover_failed_tasks(&self) -> Result<Vec<String>, String> {
+        let mut nodes = self.nodes.lock().map_err(|e| e.to_string())?;
+        let mut ready_queue = self.ready_queue.lock().map_err(|e| e.to_string())?;
+        let mut recovered = Vec::new();
+
+        for (task_id, node) in nodes.iter_mut() {
+            if let TaskState::Failed(_) = node.state {
+                if node.retry_count < 3 {  // 最大重试次数
+                    node.state = TaskState::Ready;
+                    node.retry_count += 1;
+                    ready_queue.push_back(task_id.clone());
+                    recovered.push(task_id.clone());
+                }
+            }
+        }
+
+        if !recovered.is_empty() {
+            self.metrics.increment_counter("task_graph.tasks.recovered", recovered.len() as u64)
+                .map_err(|e| e.to_string())?;
+        }
+
+        Ok(recovered)
+    }
+
+    // 添加任务超时处理
+    pub fn handle_timeouts(&self) -> Result<Vec<String>, String> {
+        let mut nodes = self.nodes.lock().map_err(|e| e.to_string())?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut timed_out = Vec::new();
+
+        for (task_id, node) in nodes.iter_mut() {
+            if let TaskState::Running = node.state {
+                if let Some(timeout) = node.task.timeout {
+                    if now > timeout.as_secs() {
+                        node.state = TaskState::Failed("Task timed out".to_string());
+                        timed_out.push(task_id.clone());
+                    }
+                }
+            }
+        }
+
+        if !timed_out.is_empty() {
+            self.metrics.increment_counter("task_graph.tasks.timed_out", timed_out.len() as u64)
+                .map_err(|e| e.to_string())?;
+        }
+
+        Ok(timed_out)
+    }
+
+    // 添加任务优先级调度
+    pub fn get_next_prioritized_task(&self) -> Option<TaskSpec> {
+        let mut ready_queue = self.ready_queue.lock().ok()?;
+        let nodes = self.nodes.lock().ok()?;
+        let mut priority_queue = BinaryHeap::new();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // 将就绪任务按优先级排序
+        while let Some(task_id) = ready_queue.pop_front() {
+            if let Some(node) = nodes.get(&task_id) {
+                if node.state == TaskState::Ready {
+                    let priority = node.task.priority.unwrap_or(0);
+                    priority_queue.push(PrioritizedTask {
+                        priority,
+                        timestamp: now,
+                        task: node.task.clone(),
+                    });
+                }
+            }
+        }
+
+        // 获取优先级最高的任务
+        priority_queue.pop().map(|pt| pt.task)
+    }
+
+    // 添加任务状态监控
+    pub fn monitor_task_states(&self) -> Result<TaskStateStats, String> {
+        let nodes = self.nodes.lock().map_err(|e| e.to_string())?;
+        let mut stats = TaskStateStats::default();
+
+        for node in nodes.values() {
+            match node.state {
+                TaskState::Pending => stats.pending += 1,
+                TaskState::Ready => stats.ready += 1,
+                TaskState::Running => stats.running += 1,
+                TaskState::Completed => stats.completed += 1,
+                TaskState::Failed(_) => stats.failed += 1,
+            }
+
+            // 记录重试统计
+            if node.retry_count > 0 {
+                stats.retried += 1;
+            }
+        }
+
+        // 更新指标
+        self.metrics.set_gauge("task_graph.tasks.pending", stats.pending as f64)
+            .map_err(|e| e.to_string())?;
+        self.metrics.set_gauge("task_graph.tasks.ready", stats.ready as f64)
+            .map_err(|e| e.to_string())?;
+        self.metrics.set_gauge("task_graph.tasks.running", stats.running as f64)
+            .map_err(|e| e.to_string())?;
+        self.metrics.set_gauge("task_graph.tasks.completed", stats.completed as f64)
+            .map_err(|e| e.to_string())?;
+        self.metrics.set_gauge("task_graph.tasks.failed", stats.failed as f64)
+            .map_err(|e| e.to_string())?;
+        self.metrics.set_gauge("task_graph.tasks.retried", stats.retried as f64)
+            .map_err(|e| e.to_string())?;
+
+        Ok(stats)
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct TaskStateStats {
+    pub pending: usize,
+    pub ready: usize,
+    pub running: usize,
+    pub completed: usize,
+    pub failed: usize,
+    pub retried: usize,
 }
 
 #[cfg(test)]

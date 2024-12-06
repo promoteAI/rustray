@@ -98,7 +98,7 @@ struct TaskInfo {
     start_time: Instant,
     /// 资源使用情况
     resources: TaskRequiredResources,
-    /// 任务句柄
+    /// 任务��柄
     handle: JoinHandle<()>,
 }
 
@@ -390,6 +390,222 @@ impl WorkerNode {
         self.status_tx.send(status).await
             .map_err(|e| e.to_string())
     }
+
+    /// 添加资源限制和隔离
+    fn enforce_resource_limits(&self, task: &TaskSpec) -> Result<(), String> {
+        let resources = self.available_resources.lock().map_err(|e| e.to_string())?;
+        
+        // 检查CPU限制
+        if let Some(req_cpu) = task.required_resources.cpu {
+            if let Some(avail_cpu) = resources.cpu {
+                if req_cpu > avail_cpu {
+                    return Err(format!("CPU request {} exceeds available {}", req_cpu, avail_cpu));
+                }
+            }
+        }
+
+        // 检查内存限制
+        if let Some(req_mem) = task.required_resources.memory {
+            if let Some(avail_mem) = resources.memory {
+                if req_mem > avail_mem {
+                    return Err(format!("Memory request {} exceeds available {}", req_mem, avail_mem));
+                }
+            }
+        }
+
+        // 检查GPU限制
+        if let Some(req_gpu) = task.required_resources.gpu {
+            if let Some(avail_gpu) = resources.gpu {
+                if req_gpu > avail_gpu {
+                    return Err(format!("GPU request {} exceeds available {}", req_gpu, avail_gpu));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// 添加任务执行环境隔离
+    async fn create_isolated_environment(&self, task: &TaskSpec) -> Result<IsolatedEnv, String> {
+        let env = IsolatedEnv {
+            task_id: task.task_id.clone(),
+            cgroup_path: format!("/sys/fs/cgroup/cpu/rustray/{}", task.task_id),
+            namespace_path: format!("/run/rustray/ns/{}", task.task_id),
+            env_vars: HashMap::new(),
+        };
+
+        // 创建cgroup
+        tokio::fs::create_dir_all(&env.cgroup_path)
+            .await
+            .map_err(|e| format!("Failed to create cgroup: {}", e))?;
+
+        // 设置CPU限制
+        if let Some(cpu) = task.required_resources.cpu {
+            tokio::fs::write(
+                format!("{}/cpu.cfs_quota_us", env.cgroup_path),
+                format!("{}", (cpu * 100000.0) as i32),
+            )
+            .await
+            .map_err(|e| format!("Failed to set CPU quota: {}", e))?;
+        }
+
+        // 设置内存限制
+        if let Some(memory) = task.required_resources.memory {
+            tokio::fs::write(
+                format!("{}/memory.limit_in_bytes", env.cgroup_path),
+                format!("{}", memory),
+            )
+            .await
+            .map_err(|e| format!("Failed to set memory limit: {}", e))?;
+        }
+
+        Ok(env)
+    }
+
+    /// 添加任务执行监控
+    async fn monitor_task_execution(&self, task_id: &str) -> Result<TaskExecutionStats, String> {
+        let tasks = self.running_tasks.lock().map_err(|e| e.to_string())?;
+        
+        if let Some(task_info) = tasks.get(task_id) {
+            let duration = task_info.start_time.elapsed();
+            
+            // 收集执行统计信息
+            let stats = TaskExecutionStats {
+                duration: duration.as_secs(),
+                cpu_usage: self.get_task_cpu_usage(task_id)?,
+                memory_usage: self.get_task_memory_usage(task_id)?,
+                io_stats: self.get_task_io_stats(task_id)?,
+            };
+
+            // 更新指标
+            self.metrics.record_histogram("worker.task.duration", duration.as_secs_f64())
+                .map_err(|e| e.to_string())?;
+            self.metrics.set_gauge("worker.task.cpu_usage", stats.cpu_usage)
+                .map_err(|e| e.to_string())?;
+            self.metrics.set_gauge("worker.task.memory_usage", stats.memory_usage as f64)
+                .map_err(|e| e.to_string())?;
+
+            Ok(stats)
+        } else {
+            Err(format!("Task {} not found", task_id))
+        }
+    }
+
+    /// 获取任务CPU使用率
+    fn get_task_cpu_usage(&self, task_id: &str) -> Result<f64, String> {
+        let cgroup_path = format!("/sys/fs/cgroup/cpu/rustray/{}/cpuacct.usage", task_id);
+        let usage = std::fs::read_to_string(cgroup_path)
+            .map_err(|e| format!("Failed to read CPU usage: {}", e))?
+            .trim()
+            .parse::<u64>()
+            .map_err(|e| format!("Failed to parse CPU usage: {}", e))?;
+
+        Ok(usage as f64 / 1_000_000_000.0)  // 转换为秒
+    }
+
+    /// 获取任务内存使用量
+    fn get_task_memory_usage(&self, task_id: &str) -> Result<usize, String> {
+        let cgroup_path = format!("/sys/fs/cgroup/memory/rustray/{}/memory.usage_in_bytes", task_id);
+        let usage = std::fs::read_to_string(cgroup_path)
+            .map_err(|e| format!("Failed to read memory usage: {}", e))?
+            .trim()
+            .parse::<usize>()
+            .map_err(|e| format!("Failed to parse memory usage: {}", e))?;
+
+        Ok(usage)
+    }
+
+    /// 获取任务IO统计信息
+    fn get_task_io_stats(&self, task_id: &str) -> Result<IoStats, String> {
+        let cgroup_path = format!("/sys/fs/cgroup/blkio/rustray/{}/blkio.throttle.io_service_bytes", task_id);
+        let content = std::fs::read_to_string(cgroup_path)
+            .map_err(|e| format!("Failed to read IO stats: {}", e))?;
+
+        let mut stats = IoStats::default();
+        for line in content.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() == 3 {
+                let bytes = parts[2].parse::<u64>()
+                    .map_err(|e| format!("Failed to parse IO bytes: {}", e))?;
+                match parts[1] {
+                    "Read" => stats.read_bytes = bytes,
+                    "Write" => stats.write_bytes = bytes,
+                    _ => {}
+                }
+            }
+        }
+
+        Ok(stats)
+    }
+
+    /// 添加故障恢复
+    async fn handle_task_failure(&self, task_id: &str, error: String) -> Result<(), String> {
+        let mut tasks = self.running_tasks.lock().map_err(|e| e.to_string())?;
+        
+        if let Some(task_info) = tasks.get_mut(task_id) {
+            // 记录失败信息
+            error!("Task {} failed: {}", task_id, error);
+            
+            // 更新指标
+            self.metrics.increment_counter("worker.tasks.failed", 1)
+                .map_err(|e| e.to_string())?;
+
+            // 清理资源
+            self.cleanup_task_resources(task_id).await?;
+
+            // 尝试重试任务
+            if task_info.retry_count < 3 {  // 最大重试次数
+                task_info.retry_count += 1;
+                info!("Retrying task {} (attempt {})", task_id, task_info.retry_count);
+                
+                // 重新提交任务
+                let task = task_info.spec.clone();
+                drop(tasks);  // 释放锁
+                self.execute_task(task).await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// 清理任务资源
+    async fn cleanup_task_resources(&self, task_id: &str) -> Result<(), String> {
+        // 清理cgroup
+        let cgroup_path = format!("/sys/fs/cgroup/cpu/rustray/{}", task_id);
+        tokio::fs::remove_dir_all(cgroup_path)
+            .await
+            .map_err(|e| format!("Failed to cleanup cgroup: {}", e))?;
+
+        // 清理namespace
+        let ns_path = format!("/run/rustray/ns/{}", task_id);
+        tokio::fs::remove_dir_all(ns_path)
+            .await
+            .map_err(|e| format!("Failed to cleanup namespace: {}", e))?;
+
+        // 释放资源
+        let mut resources = self.available_resources.lock().map_err(|e| e.to_string())?;
+        let tasks = self.running_tasks.lock().map_err(|e| e.to_string())?;
+        
+        if let Some(task_info) = tasks.get(task_id) {
+            if let Some(cpu) = task_info.resources.cpu {
+                if let Some(ref mut avail_cpu) = resources.cpu {
+                    *avail_cpu += cpu;
+                }
+            }
+            if let Some(memory) = task_info.resources.memory {
+                if let Some(ref mut avail_mem) = resources.memory {
+                    *avail_mem += memory;
+                }
+            }
+            if let Some(gpu) = task_info.resources.gpu {
+                if let Some(ref mut avail_gpu) = resources.gpu {
+                    *avail_gpu += gpu;
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// 任务执行器
@@ -423,6 +639,28 @@ impl TaskExecutor {
         self.metrics.record_histogram("worker.task.duration", duration.as_secs_f64())
             .unwrap_or_else(|e| error!("Failed to update task metrics: {}", e));
     }
+}
+
+#[derive(Debug)]
+struct IsolatedEnv {
+    task_id: String,
+    cgroup_path: String,
+    namespace_path: String,
+    env_vars: HashMap<String, String>,
+}
+
+#[derive(Debug)]
+struct TaskExecutionStats {
+    duration: u64,
+    cpu_usage: f64,
+    memory_usage: usize,
+    io_stats: IoStats,
+}
+
+#[derive(Debug, Default)]
+struct IoStats {
+    read_bytes: u64,
+    write_bytes: u64,
 }
 
 #[cfg(test)]
