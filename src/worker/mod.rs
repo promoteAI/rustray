@@ -21,18 +21,14 @@ pub struct WorkerNode {
 #[derive(Debug)]
 struct RunningTask {
     spec: TaskSpec,
-    #[allow(dead_code)]
     start_time: Instant,
     resources: TaskRequiredResources,
 }
 
 #[derive(Debug)]
 struct CachedData {
-    #[allow(dead_code)]
     key: String,
-    #[allow(dead_code)]
     size: usize,
-    #[allow(dead_code)]
     last_used: Instant,
 }
 

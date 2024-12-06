@@ -63,7 +63,6 @@ pub struct HeadNode {
     workers: Arc<RwLock<HashMap<Uuid, WorkerInfo>>>,
     task_graph: Arc<TaskGraph>,
     load_balancer: Arc<LoadBalancer>,
-    #[allow(dead_code)]
     object_store: Arc<ObjectStore>,
     metrics: Arc<MetricsCollector>,
     status_tx: mpsc::Sender<ClusterStatus>,
@@ -73,7 +72,6 @@ pub struct HeadNode {
 /// Worker node information
 #[derive(Debug, Clone)]
 struct WorkerInfo {
-    #[allow(dead_code)]
     node_info: NodeInfo,
     last_heartbeat: Instant,
     resources: TaskRequiredResources,
