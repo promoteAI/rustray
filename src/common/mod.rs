@@ -66,7 +66,7 @@ impl Default for RetryStrategy {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskSpec {
     /// 任务唯一标识符
-    pub task_id: String,
+    pub task_id: Uuid,
     /// 要执行的函数名
     pub function_name: String,
     /// 函数参数（序列化后的字节数组）
@@ -90,7 +90,7 @@ pub struct TaskSpec {
 impl Default for TaskSpec {
     fn default() -> Self {
         Self {
-            task_id: Uuid::new_v4().to_string(),
+            task_id: Uuid::new_v4(),
             function_name: String::new(),
             args: Vec::new(),
             kwargs: HashMap::new(),
@@ -143,7 +143,7 @@ pub enum TaskResult {
 pub struct NodeInfo {
     /// 节点唯一标识符
     pub node_id: Uuid,
-    /// 节点类型（头节点或工作节点）
+    /// 节点类型（头节点或工作节点
     pub node_type: NodeType,
     /// 节点地址
     pub address: String,
@@ -152,7 +152,7 @@ pub struct NodeInfo {
 }
 
 /// 节点类型
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum NodeType {
     /// 头节点，负责调度和管理
     Head,
@@ -181,6 +181,100 @@ pub struct WorkerResources {
     pub gpu_available: usize,
     /// 网络带宽（Mbps）
     pub network_bandwidth: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskSpec {
+    pub task_id: Uuid,
+    pub name: String,
+    pub priority: i32,
+    pub required_resources: TaskRequiredResources,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskRequiredResources {
+    pub cpu_cores: u32,
+    pub memory_mb: u64,
+    pub disk_mb: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskResult {
+    pub task_id: Uuid,
+    pub status: TaskStatus,
+    pub result: Option<Vec<u8>>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum TaskStatus {
+    Pending,
+    Running,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Matrix {
+    pub rows: usize,
+    pub cols: usize,
+    pub data: Vec<f64>,
+}
+
+impl Matrix {
+    pub fn new(rows: usize, cols: usize) -> Self {
+        Self {
+            rows,
+            cols,
+            data: vec![0.0; rows * cols],
+        }
+    }
+
+    pub fn random(rows: usize, cols: usize) -> Self {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        let data = (0..rows * cols).map(|_| rng.gen()).collect();
+        Self { rows, cols, data }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum NodeType {
+    Head,
+    Worker,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeInfo {
+    pub node_id: Uuid,
+    pub node_type: NodeType,
+    pub address: String,
+    pub port: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum NodeHealth {
+    Healthy,
+    Unhealthy(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerResources {
+    pub cpu_cores: u32,
+    pub memory_mb: u64,
+    pub disk_mb: u64,
+    pub network_bandwidth: f64,
+}
+
+impl Default for WorkerResources {
+    fn default() -> Self {
+        Self {
+            cpu_cores: num_cpus::get() as u32,
+            memory_mb: 1024 * 1024, // 1 GB
+            disk_mb: 1024 * 1024 * 10, // 10 GB
+            network_bandwidth: 1000.0, // 1 Gbps
+        }
+    }
 }
 
 #[cfg(test)]

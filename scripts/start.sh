@@ -23,7 +23,7 @@ case $1 in
         
     "worker")
         echo "Starting worker node on port $WORKER_PORT..."
-        RUST_LOG=info cargo run --release -- --node-type worker --port $WORKER_PORT > logs/worker_$WORKER_PORT.log 2>&1 &
+        RUST_LOG=info cargo run --release -- --node-type worker --port $WORKER_PORT --head-addr "127.0.0.1:$HEAD_PORT" > logs/worker_$WORKER_PORT.log 2>&1 &
         echo $! > logs/worker_$WORKER_PORT.pid
         echo "Worker node started (PID: $(cat logs/worker_$WORKER_PORT.pid))"
         ;;

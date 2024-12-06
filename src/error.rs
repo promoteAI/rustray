@@ -63,6 +63,15 @@ pub enum RustRayError {
 
     #[error("Dependency error: {0}")]
     DependencyError(String),
+
+    #[error("Task execution failed: {0}")]
+    TaskExecutionFailed(String),
+
+    #[error("Authentication error: {0}")]
+    AuthError(String),
+
+    #[error("Invalid configuration: {0}")]
+    ConfigError(String),
 }
 
 impl From<RustRayError> for Status {
@@ -88,6 +97,9 @@ impl From<RustRayError> for Status {
             RustRayError::DatabaseError(msg) => Status::internal(msg),
             RustRayError::NetworkError(msg) => Status::unavailable(msg),
             RustRayError::DependencyError(msg) => Status::failed_precondition(msg),
+            RustRayError::TaskExecutionFailed(msg) => Status::failed_precondition(msg),
+            RustRayError::AuthError(msg) => Status::unauthenticated(msg),
+            RustRayError::ConfigError(msg) => Status::failed_precondition(msg),
         }
     }
 }

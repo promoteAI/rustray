@@ -1,53 +1,34 @@
 pub mod notification;
 
-use crate::common::{TaskSpec, TaskResult};
+use crate::common::{TaskSpec, TaskResult, TaskStatus};
 use crate::error::{Result, RustRayError};
+use crate::notification::NotificationManager;
 use uuid::Uuid;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use std::time::{Duration, Instant};
-use anyhow::{Result, anyhow};
-use serde::{Serialize, Deserialize};
-use metrics::{counter, histogram};
 
-/// 任务状态
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum TaskStatus {
-    /// 等待执行
-    Pending,
-    /// 正在执行
-    Running,
-    /// 已完成
-    Completed,
-    /// 执行失败
-    Failed,
-}
-
-/// 任务管理器，负责管理任务的生命周期
+/// Task manager responsible for managing task lifecycle
 pub struct TaskManager {
-    /// 任务状态映射表
+    /// Task status mapping
     tasks: Arc<RwLock<HashMap<Uuid, TaskStatus>>>,
-    /// 任务结果映射表
+    /// Task results mapping
     results: Arc<RwLock<HashMap<Uuid, TaskResult>>>,
-    /// 通知管理器
-    notification_manager: notification::NotificationManager,
+    /// Notification manager
+    notification_manager: NotificationManager,
 }
 
 impl TaskManager {
-    /// 创建新的任务管理器
+    /// Create new task manager
     pub fn new() -> Self {
         Self {
             tasks: Arc::new(RwLock::new(HashMap::new())),
             results: Arc::new(RwLock::new(HashMap::new())),
-            notification_manager: notification::NotificationManager::new(1000),
+            notification_manager: NotificationManager::new(1000),
         }
     }
 
-    /// 提交新任务
-    /// 
-    /// # Arguments
-    /// * `task` - 任务规范
+    /// Submit new task
     pub async fn submit_task(&self, task: TaskSpec) -> Result<Uuid> {
         let mut tasks = self.tasks.write().await;
         
@@ -63,11 +44,7 @@ impl TaskManager {
         Ok(task.task_id)
     }
 
-    /// 更新任务状态
-    /// 
-    /// # Arguments
-    /// * `task_id` - 任务ID
-    /// * `status` - 新状态
+    /// Update task status
     pub async fn update_task_status(&self, task_id: Uuid, status: TaskStatus) -> Result<()> {
         let mut tasks = self.tasks.write().await;
         
@@ -83,10 +60,7 @@ impl TaskManager {
         Ok(())
     }
 
-    /// 设置任务结果
-    /// 
-    /// # Arguments
-    /// * `result` - 任务结果
+    /// Set task result
     pub async fn set_task_result(&self, result: TaskResult) -> Result<()> {
         let mut tasks = self.tasks.write().await;
         let mut results = self.results.write().await;
@@ -102,15 +76,12 @@ impl TaskManager {
         tasks.insert(result.task_id, TaskStatus::Completed);
         results.insert(result.task_id, result.clone());
         
-        // 发送任务完成通知
+        // Send task completion notification
         self.notification_manager.notify(result).await?;
         Ok(())
     }
 
-    /// 获取任务状态
-    /// 
-    /// # Arguments
-    /// * `task_id` - 任务ID
+    /// Get task status
     pub async fn get_task_status(&self, task_id: Uuid) -> Result<TaskStatus> {
         let tasks = self.tasks.read().await;
         
@@ -121,17 +92,14 @@ impl TaskManager {
             ))
     }
 
-    /// 获取任务结果
-    /// 
-    /// # Arguments
-    /// * `task_id` - 任务ID
+    /// Get task result
     pub async fn get_task_result(&self, task_id: Uuid) -> Result<Option<TaskResult>> {
         let results = self.results.read().await;
         Ok(results.get(&task_id).cloned())
     }
 
-    /// 获取通知管理器的引用
-    pub fn notification_manager(&self) -> &notification::NotificationManager {
+    /// Get reference to notification manager
+    pub fn notification_manager(&self) -> &NotificationManager {
         &self.notification_manager
     }
 } 
