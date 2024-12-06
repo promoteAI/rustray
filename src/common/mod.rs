@@ -242,6 +242,53 @@ impl Matrix {
         let data = (0..rows * cols).map(|_| rng.gen()).collect();
         Self { rows, cols, data }
     }
+
+    pub fn get(&self, row: usize, col: usize) -> f64 {
+        self.data[row * self.cols + col]
+    }
+
+    pub fn set(&mut self, row: usize, col: usize, value: f64) {
+        self.data[row * self.cols + col] = value;
+    }
+
+    pub fn get_block(&self, start_row: usize, end_row: usize, start_col: usize, end_col: usize) -> Self {
+        let rows = end_row - start_row;
+        let cols = end_col - start_col;
+        let mut block = Matrix::new(rows, cols);
+        
+        for i in 0..rows {
+            for j in 0..cols {
+                let value = self.get(start_row + i, start_col + j);
+                block.set(i, j, value);
+            }
+        }
+        block
+    }
+
+    pub fn set_block(&mut self, start_row: usize, start_col: usize, block: &Matrix) {
+        for i in 0..block.rows {
+            for j in 0..block.cols {
+                let value = block.get(i, j);
+                self.set(start_row + i, start_col + j, value);
+            }
+        }
+    }
+
+    pub fn multiply_block(&self, other: &Matrix) -> Matrix {
+        assert_eq!(self.cols, other.rows, "Matrix dimensions must match for multiplication");
+        let mut result = Matrix::new(self.rows, other.cols);
+        
+        for i in 0..self.rows {
+            for j in 0..other.cols {
+                let mut sum = 0.0;
+                for k in 0..self.cols {
+                    sum += self.get(i, k) * other.get(k, j);
+                }
+                result.set(i, j, sum);
+            }
+        }
+        result
+    }
 }
 
 #[cfg(test)]
