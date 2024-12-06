@@ -5,9 +5,6 @@ pub mod task_graph;
 pub use self::load_balancer::LoadBalancer;
 pub use self::task_graph::TaskGraph;
 
-use crate::common::{NodeInfo, TaskSpec, TaskStatus};
-use std::sync::Arc;
-
 /// Node health status
 #[derive(Debug, Clone, PartialEq)]
 pub enum NodeHealth {

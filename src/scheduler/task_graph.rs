@@ -5,19 +5,22 @@ use uuid::Uuid;
 
 use crate::common::{TaskSpec, TaskStatus};
 use crate::error::{Result, RustRayError};
+use crate::metrics::MetricsCollector;
 
 pub struct TaskGraph {
     tasks: Arc<RwLock<HashMap<Uuid, TaskSpec>>>,
     dependencies: Arc<RwLock<HashMap<Uuid, HashSet<Uuid>>>>,
     status: Arc<RwLock<HashMap<Uuid, TaskStatus>>>,
+    metrics: Arc<MetricsCollector>,
 }
 
 impl TaskGraph {
-    pub fn new() -> Self {
+    pub fn new(metrics: Arc<MetricsCollector>) -> Self {
         Self {
             tasks: Arc::new(RwLock::new(HashMap::new())),
             dependencies: Arc::new(RwLock::new(HashMap::new())),
             status: Arc::new(RwLock::new(HashMap::new())),
+            metrics,
         }
     }
 
@@ -30,6 +33,9 @@ impl TaskGraph {
         tasks.insert(task_id, task);
         dependencies.insert(task_id, deps.into_iter().collect());
         status.insert(task_id, TaskStatus::Pending);
+
+        self.metrics.increment_counter("task_graph.tasks.added", 1).await
+            .map_err(|e| RustRayError::InternalError(e.to_string()))?;
 
         Ok(())
     }
@@ -57,6 +63,9 @@ impl TaskGraph {
             }
         }
 
+        self.metrics.set_gauge("task_graph.ready_tasks", ready_tasks.len() as f64).await
+            .map_err(|e| RustRayError::InternalError(e.to_string()))?;
+
         Ok(ready_tasks)
     }
 
@@ -65,6 +74,13 @@ impl TaskGraph {
 
         if let Some(current_status) = status.get_mut(&task_id) {
             *current_status = new_status;
+
+            self.metrics.increment_counter(
+                &format!("task_graph.status.{:?}", new_status), 
+                1
+            ).await
+                .map_err(|e| RustRayError::InternalError(e.to_string()))?;
+
             Ok(())
         } else {
             Err(RustRayError::TaskError(format!("Task {} not found", task_id)))

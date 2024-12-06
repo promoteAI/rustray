@@ -7,40 +7,56 @@
 //! - 高效的存储引擎
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use crate::error::{Result, RustRayError};
+use std::sync::RwLock;
 
+/// Object store for storing and retrieving data
 pub struct ObjectStore {
-    data: Arc<RwLock<HashMap<String, Vec<u8>>>>,
+    name: String,
+    data: RwLock<HashMap<String, Vec<u8>>>,
 }
 
 impl ObjectStore {
-    pub fn new() -> Self {
+    /// Create a new object store
+    pub fn new(name: String) -> Self {
         Self {
-            data: Arc::new(RwLock::new(HashMap::new())),
+            name,
+            data: RwLock::new(HashMap::new()),
         }
     }
 
-    pub async fn put(&self, key: String, value: Vec<u8>) -> Result<()> {
-        let mut data = self.data.write().await;
-        data.insert(key, value);
-        Ok(())
+    /// Store data with the given key
+    pub fn put(&self, key: String, data: Vec<u8>) {
+        let mut store = self.data.write().unwrap();
+        store.insert(key, data);
     }
 
-    pub async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
-        let data = self.data.read().await;
-        Ok(data.get(key).cloned())
+    /// Get data by key
+    pub fn get(&self, key: &str) -> Option<Vec<u8>> {
+        let store = self.data.read().unwrap();
+        store.get(key).cloned()
     }
 
-    pub async fn delete(&self, key: &str) -> Result<()> {
-        let mut data = self.data.write().await;
-        data.remove(key);
-        Ok(())
+    /// Delete data by key
+    pub fn delete(&self, key: &str) {
+        let mut store = self.data.write().unwrap();
+        store.remove(key);
     }
 
-    pub async fn exists(&self, key: &str) -> Result<bool> {
-        let data = self.data.read().await;
-        Ok(data.contains_key(key))
+    /// Check if key exists
+    pub fn exists(&self, key: &str) -> bool {
+        let store = self.data.read().unwrap();
+        store.contains_key(key)
+    }
+
+    /// Get all keys
+    pub fn keys(&self) -> Vec<String> {
+        let store = self.data.read().unwrap();
+        store.keys().cloned().collect()
+    }
+
+    /// Clear all data
+    pub fn clear(&self) {
+        let mut store = self.data.write().unwrap();
+        store.clear();
     }
 } 

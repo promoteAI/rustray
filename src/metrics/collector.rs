@@ -1,96 +1,95 @@
-use std::sync::Arc;
-use tokio::sync::RwLock;
 use std::collections::HashMap;
-use uuid::Uuid;
+use std::sync::RwLock;
 use std::time::Instant;
-use anyhow::Result;
+use crate::error::Result;
 
-#[derive(Debug, Clone)]
-pub struct TaskExecution {
-    pub task_id: Uuid,
-    pub start_time: Instant,
-    pub end_time: Option<Instant>,
-    pub cpu_usage: f64,
-    pub memory_usage: u64,
-}
-
-#[derive(Debug, Clone)]
-pub struct ResourceUsage {
-    pub cpu_usage: f64,
-    pub memory_usage: u64,
-    pub disk_usage: u64,
-    pub network_bandwidth: f64,
-}
-
-#[derive(Debug, Clone)]
-pub enum MetricType {
-    Counter(f64),
-    Gauge(f64),
-    Histogram(Vec<f64>),
-}
-
+/// Metrics collector for system monitoring
 pub struct MetricsCollector {
-    metrics: Arc<RwLock<HashMap<String, MetricType>>>,
-    task_executions: Arc<RwLock<HashMap<Uuid, TaskExecution>>>,
+    name: String,
+    counters: RwLock<HashMap<String, i64>>,
+    gauges: RwLock<HashMap<String, f64>>,
+    histograms: RwLock<HashMap<String, Vec<f64>>>,
+    timers: RwLock<HashMap<String, Instant>>,
 }
 
 impl MetricsCollector {
-    pub fn new() -> Self {
+    /// Create a new metrics collector
+    pub fn new(name: String) -> Self {
         Self {
-            metrics: Arc::new(RwLock::new(HashMap::new())),
-            task_executions: Arc::new(RwLock::new(HashMap::new())),
+            name,
+            counters: RwLock::new(HashMap::new()),
+            gauges: RwLock::new(HashMap::new()),
+            histograms: RwLock::new(HashMap::new()),
+            timers: RwLock::new(HashMap::new()),
         }
     }
 
-    pub async fn record_metric(&self, name: &str, value: MetricType) -> Result<()> {
-        let mut metrics = self.metrics.write().await;
-        metrics.insert(name.to_string(), value);
+    /// Increment a counter by the given value
+    pub async fn increment_counter(&self, key: &str, value: i64) -> Result<(), String> {
+        let mut counters = self.counters.write().unwrap();
+        let counter = counters.entry(key.to_string()).or_insert(0);
+        *counter += value;
         Ok(())
     }
 
-    pub async fn get_metric(&self, name: &str) -> Result<Option<MetricType>> {
-        let metrics = self.metrics.read().await;
-        Ok(metrics.get(name).cloned())
+    /// Set a gauge value
+    pub async fn set_gauge(&self, key: &str, value: f64) -> Result<(), String> {
+        let mut gauges = self.gauges.write().unwrap();
+        gauges.insert(key.to_string(), value);
+        Ok(())
     }
 
-    pub async fn increment_counter(&self, name: &str, value: u64) -> Result<()> {
-        let mut metrics = self.metrics.write().await;
-        let counter = metrics.entry(name.to_string())
-            .or_insert(MetricType::Counter(0.0));
-        
-        if let MetricType::Counter(ref mut count) = counter {
-            *count += value as f64;
+    /// Record a value in a histogram
+    pub async fn record_histogram(&self, key: &str, value: f64) -> Result<(), String> {
+        let mut histograms = self.histograms.write().unwrap();
+        let histogram = histograms.entry(key.to_string()).or_insert_with(Vec::new);
+        histogram.push(value);
+        Ok(())
+    }
+
+    /// Start a timer
+    pub async fn start_timer(&self, key: &str) -> Result<(), String> {
+        let mut timers = self.timers.write().unwrap();
+        timers.insert(key.to_string(), Instant::now());
+        Ok(())
+    }
+
+    /// Stop a timer and record the duration
+    pub async fn stop_timer(&self, key: &str) -> Result<f64, String> {
+        let mut timers = self.timers.write().unwrap();
+        if let Some(start_time) = timers.remove(key) {
+            let duration = start_time.elapsed();
+            let duration_secs = duration.as_secs_f64();
+            self.record_histogram(key, duration_secs).await?;
+            Ok(duration_secs)
+        } else {
+            Err("Timer not found".to_string())
         }
-        
-        Ok(())
     }
 
-    pub async fn set_gauge(&self, name: &str, value: f64) -> Result<()> {
-        let mut metrics = self.metrics.write().await;
-        metrics.insert(name.to_string(), MetricType::Gauge(value));
-        Ok(())
+    /// Get a counter value
+    pub fn get_counter(&self, key: &str) -> Option<i64> {
+        let counters = self.counters.read().unwrap();
+        counters.get(key).copied()
     }
 
-    pub async fn record_histogram(&self, name: &str, value: f64) -> Result<()> {
-        let mut metrics = self.metrics.write().await;
-        let histogram = metrics.entry(name.to_string())
-            .or_insert(MetricType::Histogram(Vec::new()));
-        
-        if let MetricType::Histogram(ref mut values) = histogram {
-            values.push(value);
-        }
-        
-        Ok(())
+    /// Get a gauge value
+    pub fn get_gauge(&self, key: &str) -> Option<f64> {
+        let gauges = self.gauges.read().unwrap();
+        gauges.get(key).copied()
     }
 
-    pub async fn record_task_execution(&self, execution: TaskExecution) -> Result<()> {
-        let mut executions = self.task_executions.write().await;
-        executions.insert(execution.task_id, execution);
-        Ok(())
+    /// Get histogram values
+    pub fn get_histogram(&self, key: &str) -> Option<Vec<f64>> {
+        let histograms = self.histograms.read().unwrap();
+        histograms.get(key).cloned()
     }
 
-    pub async fn get_task_execution(&self, task_id: Uuid) -> Result<Option<TaskExecution>> {
-        let executions = self.task_executions.read().await;
-        Ok(executions.get(&task_id).cloned())
+    /// Reset all metrics
+    pub fn reset(&self) {
+        self.counters.write().unwrap().clear();
+        self.gauges.write().unwrap().clear();
+        self.histograms.write().unwrap().clear();
+        self.timers.write().unwrap().clear();
     }
 } 

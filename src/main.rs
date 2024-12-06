@@ -1,128 +1,202 @@
-//! 主程序入口
+//! RustRay Distributed Task Processing Framework
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
-use std::net::SocketAddr;
+use tokio::{signal, sync::mpsc};
 use tonic::transport::Server;
-use tracing::{info, warn, error};
+use tracing::{info, warn, error, Level};
+use tracing_subscriber::FmtSubscriber;
 
-// 从 crate 根导入模块
 use rustray::{
-    grpc::{
-        rustray::rust_ray_server::RustRayServer,
-        RustRayService,
-    },
-    head::HeadNode,
+    proto::rust_ray_server::RustRayServer,
+    grpc::RustRayService,
+    head::{HeadNode, HeadNodeConfig},
     worker::WorkerNode,
     error::Result,
+    common::object_store::ObjectStore,
+    metrics::MetricsCollector,
 };
 
+/// Command-line arguments for RustRay nodes
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(
+    name = "RustRay",
+    version = "0.1.0",
+    about = "Distributed task processing framework",
+    long_about = "A high-performance distributed computing framework"
+)]
 struct Args {
-    /// 节点类型
+    /// Type of node to run
     #[arg(short, long, value_enum)]
     node_type: NodeType,
 
-    /// 监听端口
+    /// Port to listen on
     #[arg(short, long, default_value_t = 8000)]
     port: u16,
 
-    /// 头节点地址 (仅工作节点需要)
+    /// Head node address (for worker nodes)
     #[arg(short, long, default_value = "127.0.0.1:8000")]
     head_addr: String,
+
+    /// Log level
+    #[arg(long, default_value = "info")]
+    log_level: String,
 }
 
+/// Node type for distributed computing
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
 enum NodeType {
     Head,
     Worker,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    // 初始化更详细的日志
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
-        .with_target(false)
-        .compact()
-        .init();
-
-    // 解析命令行参数
-    let args = Args::parse();
-
-    // 构建监听地址
-    let addr: SocketAddr = match format!("0.0.0.0:{}", args.port).parse() {
-        Ok(addr) => addr,
-        Err(e) => {
-            error!("Invalid address: {}", e);
-            return Err(anyhow::anyhow!("Invalid address: {}", e).into());
+/// Initialize logging with dynamic log level
+fn setup_logging(level: &str) -> Result<()> {
+    let log_level = match level.to_lowercase().as_str() {
+        "trace" => Level::TRACE,
+        "debug" => Level::DEBUG,
+        "info" => Level::INFO,
+        "warn" => Level::WARN,
+        "error" => Level::ERROR,
+        _ => {
+            warn!("Invalid log level '{}', defaulting to INFO", level);
+            Level::INFO
         }
     };
 
-    // 设置 Ctrl+C 处理
-    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let subscriber = FmtSubscriber::builder()
+        .with_max_level(log_level)
+        .with_target(false)
+        .with_thread_ids(true)
+        .with_thread_names(true)
+        .compact()
+        .finish();
 
-    tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.expect("Failed to install Ctrl+C handler");
-        info!("Received Ctrl+C, shutting down...");
-        let _ = shutdown_tx.send(());
-    });
+    tracing::subscriber::set_global_default(subscriber)
+        .map_err(|e| anyhow::anyhow!("Failed to set logging subscriber: {}", e))?;
+
+    Ok(())
+}
+
+/// Graceful shutdown handler
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        signal::ctrl_c()
+            .await
+            .expect("Failed to install Ctrl+C handler")
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("Failed to install terminate signal handler")
+            .recv()
+            .await
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending();
+
+    tokio::select! {
+        _ = ctrl_c => info!("Received Ctrl+C, initiating shutdown"),
+        _ = terminate => info!("Received termination signal, initiating shutdown"),
+    }
+}
+
+/// Main application entry point
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Parse command-line arguments
+    let args = Args::parse();
+
+    // Setup logging
+    setup_logging(&args.log_level)?;
+
+    // Configure server address
+    let addr: SocketAddr = format!("0.0.0.0:{}", args.port)
+        .parse()
+        .map_err(|e| anyhow::anyhow!("Invalid address: {}", e))?;
+
+    // Spawn shutdown signal handler
+    let shutdown_handle = tokio::spawn(shutdown_signal());
 
     match args.node_type {
         NodeType::Head => {
-            // 启动头节点
             info!("Starting head node on {}", addr);
-            let head = match HeadNode::new(addr.ip().to_string(), addr.port()) {
-                Ok(head) => head,
-                Err(e) => {
-                    error!("Failed to create head node: {}", e);
-                    return Err(e);
-                }
+            
+            // Create head node configuration
+            let config = HeadNodeConfig {
+                address: addr.ip().to_string(),
+                port: addr.port(),
+                heartbeat_timeout: Duration::from_secs(30),
+                resource_monitor_interval: Duration::from_secs(10),
+                scheduling_strategy: rustray::scheduler::LoadBalanceStrategy::RoundRobin,
             };
 
-            let service = RustRayService::new(head);
+            // Create shared components
+            let object_store = Arc::new(ObjectStore::new("default".to_string()));
+            let metrics = Arc::new(MetricsCollector::new("head".to_string()));
+            let (status_tx, _status_rx) = mpsc::channel(100);
+
+            // Create head node
+            let head = HeadNode::new(
+                config,
+                object_store,
+                metrics.clone(),
+                status_tx,
+            );
+
+            // Create worker node for local tasks
+            let worker = WorkerNode::new(
+                addr.ip().to_string(),
+                addr.port(),
+                metrics,
+            );
+
+            // Create gRPC service
+            let service = RustRayService::new(head, worker);
             
             let server = Server::builder()
-                .add_service(RustRayServer::new(service));
+                .add_service(RustRayServer::new(service))
+                .serve_with_shutdown(addr, async {
+                    shutdown_handle.await.ok();
+                });
 
-            info!("Head node server starting...");
+            info!("Head node server started successfully");
             
-            tokio::select! {
-                result = server.serve(addr) => {
-                    match result {
-                        Ok(_) => info!("Server shutdown gracefully"),
-                        Err(e) => error!("Server error: {}", e)
-                    }
-                }
-                _ = shutdown_rx => {
-                    info!("Shutdown signal received");
-                }
+            if let Err(e) = server.await {
+                error!("Head node server error: {}", e);
+                return Err(e.into());
             }
         }
         NodeType::Worker => {
-            // 启动工作节点
             info!("Starting worker node on {} (head: {})", addr, args.head_addr);
-            let worker = match WorkerNode::new(addr.ip().to_string(), addr.port()) {
-                Ok(worker) => worker,
-                Err(e) => {
-                    error!("Failed to create worker node: {}", e);
-                    return Err(e);
-                }
-            };
-
-            info!("Connecting to head node at {}", args.head_addr);
-            match worker.connect_to_head(&args.head_addr).await {
-                Ok(_) => info!("Successfully connected to head node"),
-                Err(e) => {
-                    error!("Failed to connect to head node: {}", e);
-                    return Err(e);
-                }
-            }
             
-            // 等待关闭信号
+            // Create metrics collector
+            let metrics = Arc::new(MetricsCollector::new("worker".to_string()));
+
+            // Create worker node
+            let worker = WorkerNode::new(
+                addr.ip().to_string(),
+                addr.port(),
+                metrics,
+            );
+            
             tokio::select! {
-                _ = shutdown_rx => {
-                    info!("Worker node shutting down");
+                result = worker.connect_to_head(&args.head_addr) => {
+                    match result {
+                        Ok(_) => info!("Successfully connected to head node"),
+                        Err(e) => {
+                            error!("Failed to connect to head node: {}", e);
+                            return Err(e);
+                        }
+                    }
+                }
+                _ = shutdown_handle => {
+                    info!("Shutdown signal received before connection");
                 }
             }
         }

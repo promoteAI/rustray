@@ -61,7 +61,7 @@ pub struct TaskSpec {
     pub retry_strategy: Option<RetryStrategy>,
     pub workflow_id: Option<String>,
     pub cache_key: Option<String>,
-    pub input_data: Vec<String>,
+    pub data_dependencies: Vec<String>,
 }
 
 impl Default for TaskSpec {
@@ -77,7 +77,7 @@ impl Default for TaskSpec {
             retry_strategy: None,
             workflow_id: None,
             cache_key: None,
-            input_data: Vec::new(),
+            data_dependencies: Vec::new(),
         }
     }
 }
@@ -93,51 +93,50 @@ pub struct TaskRequiredResources {
 
 impl TaskRequiredResources {
     pub fn can_fit(&self, available: &TaskRequiredResources) -> bool {
-        // Check CPU requirements
+        // 如果没有指定任何资源要求，则认为可以运行
+        if self.cpu.is_none() && self.memory.is_none() && 
+           self.gpu.is_none() && self.disk_mb.is_none() {
+            return true;
+        }
+
+        // 检查CPU要求
         if let Some(req_cpu) = self.cpu {
-            if let Some(avail_cpu) = available.cpu {
-                if req_cpu > avail_cpu {
-                    return false;
-                }
-            } else {
-                return false;
+            match available.cpu {
+                Some(avail_cpu) if req_cpu <= avail_cpu => (),
+                _ => return false,
             }
         }
 
-        // Check memory requirements
+        // 检查内存要求
         if let Some(req_mem) = self.memory {
-            if let Some(avail_mem) = available.memory {
-                if req_mem > avail_mem {
-                    return false;
-                }
-            } else {
-                return false;
+            match available.memory {
+                Some(avail_mem) if req_mem <= avail_mem => (),
+                _ => return false,
             }
         }
 
-        // Check GPU requirements
+        // 检查GPU要求
         if let Some(req_gpu) = self.gpu {
-            if let Some(avail_gpu) = available.gpu {
-                if req_gpu > avail_gpu {
-                    return false;
-                }
-            } else {
-                return false;
+            match available.gpu {
+                Some(avail_gpu) if req_gpu <= avail_gpu => (),
+                _ => return false,
             }
         }
 
-        // Check disk requirements
+        // 检查磁盘要求
         if let Some(req_disk) = self.disk_mb {
-            if let Some(avail_disk) = available.disk_mb {
-                if req_disk > avail_disk {
-                    return false;
-                }
-            } else {
-                return false;
+            match available.disk_mb {
+                Some(avail_disk) if req_disk <= avail_disk => (),
+                _ => return false,
             }
         }
 
         true
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.cpu.is_none() && self.memory.is_none() && 
+        self.gpu.is_none() && self.disk_mb.is_none()
     }
 }
 

@@ -14,8 +14,15 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::common::{NodeInfo, TaskSpec, TaskRequiredResources};
-use crate::metrics::collector::MetricsCollector;
-use crate::error::{Result, RustRayError};
+use crate::metrics::MetricsCollector;
+use crate::error::Result;
+
+#[derive(Debug)]
+struct NodeScore {
+    node_id: Uuid,
+    data_locality_score: f64,
+    resource_score: f64,
+}
 
 pub struct DataAwareScheduler {
     node_resources: Arc<RwLock<HashMap<Uuid, TaskRequiredResources>>>,
@@ -52,7 +59,7 @@ impl DataAwareScheduler {
         Ok(())
     }
 
-    pub async fn select_node(
+    pub async fn select_best_node(
         &self,
         task: &TaskSpec,
         available_nodes: &[NodeInfo],
@@ -60,46 +67,61 @@ impl DataAwareScheduler {
         let node_resources = self.node_resources.read().await;
         let data_locality = self.data_locality.read().await;
 
-        // Filter nodes by resource requirements
-        let mut candidate_nodes: Vec<_> = available_nodes.iter()
-            .filter(|node| {
-                if let Some(resources) = node_resources.get(&node.node_id) {
-                    task.required_resources.can_fit(resources)
-                } else {
-                    false
-                }
-            })
-            .collect();
+        // 计算每个节点的得分
+        let mut node_scores: Vec<NodeScore> = Vec::new();
 
-        if candidate_nodes.is_empty() {
+        for node in available_nodes {
+            let resources = match node_resources.get(&node.node_id) {
+                Some(r) => r,
+                None => continue,
+            };
+
+            // 检查资源是否满足要求
+            if !task.required_resources.can_fit(resources) {
+                continue;
+            }
+
+            // 计算数据局部性得分
+            let mut locality_score = 0.0;
+            let data_deps = &task.data_dependencies;
+            if !data_deps.is_empty() {
+                for data_id in data_deps {
+                    if let Some(nodes) = data_locality.get(data_id) {
+                        if nodes.contains(&node.node_id) {
+                            locality_score += 1.0;
+                        }
+                    }
+                }
+                locality_score /= data_deps.len() as f64;
+            }
+
+            // 计算资源得分
+            let cpu_score = resources.cpu.map(|cpu| cpu / task.required_resources.cpu.unwrap_or(1.0))
+                .unwrap_or(0.0);
+            let memory_score = resources.memory.map(|mem| mem as f64 / task.required_resources.memory.unwrap_or(1024) as f64)
+                .unwrap_or(0.0);
+            let resource_score = (cpu_score + memory_score) / 2.0;
+
+            node_scores.push(NodeScore {
+                node_id: node.node_id,
+                data_locality_score: locality_score,
+                resource_score,
+            });
+        }
+
+        if node_scores.is_empty() {
             return Ok(None);
         }
 
-        // Score nodes based on data locality
-        let mut node_scores = HashMap::new();
-        for node in &candidate_nodes {
-            let mut score = 0.0;
-            
-            // Calculate data locality score
-            for data_id in &task.input_data {
-                if let Some(locations) = data_locality.get(data_id) {
-                    if locations.contains(&node.node_id) {
-                        score += 1.0;
-                    }
-                }
-            }
+        // 根据综合得分选择最佳节点
+        let best_node = node_scores.iter()
+            .max_by(|a, b| {
+                let score_a = a.data_locality_score * 0.7 + a.resource_score * 0.3;
+                let score_b = b.data_locality_score * 0.7 + b.resource_score * 0.3;
+                score_a.partial_cmp(&score_b).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|score| score.node_id);
 
-            node_scores.insert(node.node_id, score);
-        }
-
-        // Sort nodes by score
-        candidate_nodes.sort_by(|a, b| {
-            let score_a = node_scores.get(&a.node_id).unwrap_or(&0.0);
-            let score_b = node_scores.get(&b.node_id).unwrap_or(&0.0);
-            score_b.partial_cmp(score_a).unwrap()
-        });
-
-        // Return the node with the highest score
-        Ok(Some(candidate_nodes[0].node_id))
+        Ok(best_node)
     }
 } 

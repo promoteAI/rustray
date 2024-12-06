@@ -11,14 +11,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, RwLock};
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use uuid::Uuid;
+use futures_util::future::TryFutureExt;
 
 use crate::common::{
-    NodeInfo, NodeType, TaskSpec, TaskStatus, TaskRequiredResources,
+    NodeInfo, NodeType, TaskSpec, TaskRequiredResources, TaskResult, TaskStatus,
     object_store::ObjectStore,
 };
-use crate::metrics::collector::MetricsCollector;
+use crate::metrics::MetricsCollector;
 use crate::scheduler::{LoadBalancer, LoadBalanceStrategy, TaskGraph, NodeHealth};
 use crate::error::{Result, RustRayError};
 
@@ -156,10 +157,11 @@ impl HeadNode {
         self.workers.write().await
             .insert(worker.node_id, worker_info);
 
-        self.load_balancer.register_node(worker)
+        self.load_balancer.register_node(worker).await
             .map_err(|e| RustRayError::InternalError(e.to_string()))?;
 
-        self.metrics.increment_counter("head.workers.registered", 1).await
+        let metrics = &*self.metrics;
+        metrics.increment_counter("head.workers.registered", 1).await
             .map_err(|e| RustRayError::InternalError(e.to_string()))?;
 
         self.update_status().await?;
@@ -173,18 +175,20 @@ impl HeadNode {
         self.task_graph.add_task(task.clone(), vec![]).await
             .map_err(|e| RustRayError::TaskError(e.to_string()))?;
 
-        if let Some(worker_id) = self.load_balancer.select_node(&task) {
+        let worker_id = self.load_balancer.select_node(&task).await?;
+        
+        if let Some(worker_id) = worker_id {
             let workers = self.workers.read().await;
                 
             if let Some(worker) = workers.get(&worker_id) {
                 // TODO: Implement task sending logic
                 
-                self.metrics.increment_counter("head.tasks.submitted", 1).await
+                let metrics = &*self.metrics;
+                metrics.increment_counter("head.tasks.submitted", 1).await
                     .map_err(|e| RustRayError::InternalError(e.to_string()))?;
             }
         }
 
-        self.update_status().await?;
         Ok(())
     }
 
@@ -199,7 +203,7 @@ impl HeadNode {
             worker.last_heartbeat = Instant::now();
             worker.resources = resources;
 
-            self.load_balancer.update_node_health(worker_id, NodeHealth::Healthy)
+            self.load_balancer.update_node_health(worker_id, NodeHealth::Healthy).await
                 .map_err(|e| RustRayError::InternalError(e.to_string()))?;
 
             self.metrics.increment_counter("head.heartbeats.received", 1).await
@@ -258,15 +262,18 @@ impl HeadNode {
 
                 for worker_id in to_remove {
                     workers.remove(&worker_id);
-                    if let Err(e) = load_balancer.update_node_health(
+                    match load_balancer.update_node_health(
                         worker_id,
                         NodeHealth::Unhealthy("Heartbeat timeout".to_string()),
-                    ) {
-                        error!("Failed to update node health: {}", e);
-                    }
-
-                    if let Err(e) = metrics.increment_counter("head.workers.timeout", 1).await {
-                        error!("Failed to update metrics: {}", e);
+                    ).await {
+                        Ok(_) => {
+                            if let Err(e) = metrics.increment_counter("head.workers.timeout", 1).await {
+                                error!("Failed to update metrics: {}", e);
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to update node health: {}", e);
+                        }
                     }
                 }
             }
@@ -337,14 +344,27 @@ impl HeadNode {
                 }
 
                 // Get next ready task
-                if let Ok(ready_tasks) = task_graph.get_ready_tasks().await {
-                    for task in ready_tasks {
-                        if let Some(worker_id) = load_balancer.select_node(&task) {
-                            // TODO: Implement task dispatch logic
-                            if let Err(e) = metrics.increment_counter("head.tasks.scheduled", 1).await {
-                                error!("Failed to update metrics: {}", e);
+                match task_graph.get_ready_tasks().await {
+                    Ok(ready_tasks) => {
+                        for task in ready_tasks {
+                            match load_balancer.select_node(&task).await {
+                                Ok(Some(worker_id)) => {
+                                    // TODO: Implement task dispatch logic
+                                    if let Err(e) = metrics.increment_counter("head.tasks.scheduled", 1).await {
+                                        error!("Failed to update metrics: {}", e);
+                                    }
+                                }
+                                Ok(None) => {
+                                    info!("No available worker for task {}", task.task_id);
+                                }
+                                Err(e) => {
+                                    error!("Failed to select node for task {}: {}", task.task_id, e);
+                                }
                             }
                         }
+                    }
+                    Err(e) => {
+                        error!("Failed to get ready tasks: {}", e);
                     }
                 }
 
@@ -353,6 +373,99 @@ impl HeadNode {
         });
 
         self.background_tasks.write().await.push(handle);
+        Ok(())
+    }
+
+    async fn check_worker_health(&self) -> Result<()> {
+        let workers = self.workers.read().await;
+        let metrics = &*self.metrics;
+
+        for (worker_id, worker) in workers.iter() {
+            if worker.last_heartbeat.elapsed() > self.config.heartbeat_timeout {
+                match self.load_balancer.update_node_health(
+                    *worker_id,
+                    NodeHealth::Unhealthy("Heartbeat timeout".to_string())
+                ).await {
+                    Ok(_) => {
+                        if let Err(e) = metrics.increment_counter("head.workers.unhealthy", 1).await {
+                            error!("Failed to update metrics: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to update node health: {}", e);
+                        return Err(RustRayError::InternalError(e.to_string()));
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn update_cluster_metrics(&self) -> Result<()> {
+        let workers = self.workers.read().await;
+        let metrics = &*self.metrics;
+
+        let mut total_cpu_usage = 0.0;
+        let mut total_memory_usage = 0;
+
+        for worker in workers.values() {
+            if let Some(cpu) = worker.resources.cpu {
+                total_cpu_usage += cpu;
+            }
+            if let Some(memory) = worker.resources.memory {
+                total_memory_usage += memory;
+            }
+        }
+
+        metrics.set_gauge("head.cluster.cpu_usage", total_cpu_usage).await
+            .map_err(|e| RustRayError::InternalError(e.to_string()))?;
+
+        metrics.set_gauge("head.cluster.memory_usage", total_memory_usage as f64).await
+            .map_err(|e| RustRayError::InternalError(e.to_string()))?;
+
+        Ok(())
+    }
+
+    pub async fn get_task_result(&self, _task_id: &Uuid) -> Result<Option<TaskResult>> {
+        // TODO: Implement task result retrieval
+        Ok(None)
+    }
+
+    pub async fn get_task_status(&self, task_id: Uuid) -> Result<TaskStatus> {
+        self.task_graph.get_task_status(task_id).await
+    }
+
+    async fn schedule_tasks(&self) -> Result<()> {
+        let tasks = self.task_graph.get_ready_tasks().await?;
+        let load_balancer = self.load_balancer.clone();
+        let metrics = &*self.metrics;
+
+        for task in tasks {
+            match load_balancer.select_node(&task).await {
+                Ok(Some(worker_id)) => {
+                    let workers = self.workers.read().await;
+                    if let Some(_worker) = workers.get(&worker_id) {
+                        // TODO: Implement task scheduling logic
+                        match metrics.increment_counter("head.tasks.scheduled", 1).await {
+                            Ok(_) => (),
+                            Err(e) => {
+                                error!("Failed to update metrics: {}", e);
+                                return Err(RustRayError::InternalError(e.to_string()));
+                            }
+                        }
+                    }
+                }
+                Ok(None) => {
+                    info!("No available worker for task {}", task.task_id);
+                }
+                Err(e) => {
+                    error!("Failed to select node for task {}: {}", task.task_id, e);
+                    return Err(RustRayError::InternalError(e.to_string()));
+                }
+            }
+        }
+
         Ok(())
     }
 }

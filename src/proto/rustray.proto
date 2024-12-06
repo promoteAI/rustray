@@ -1,0 +1,96 @@
+syntax = "proto3";
+
+package rustray;
+
+// Task specification
+message TaskSpec {
+    string task_id = 1;
+    string function_name = 2;
+    repeated bytes args = 3;
+    map<string, bytes> kwargs = 4;
+    TaskRequiredResources required_resources = 5;
+}
+
+// Task required resources
+message TaskRequiredResources {
+    optional double cpu = 1;
+    optional uint64 memory = 2;
+    optional uint64 gpu = 3;
+}
+
+// Task result
+message TaskResult {
+    string task_id = 1;
+    bytes result = 2;
+    string error = 3;
+}
+
+// Task status
+enum TaskStatus {
+    PENDING = 0;
+    RUNNING = 1;
+    COMPLETED = 2;
+    FAILED = 3;
+    CANCELLED = 4;
+}
+
+// Node information
+message NodeInfo {
+    string node_id = 1;
+    string address = 2;
+    uint32 port = 3;
+    NodeType node_type = 4;
+}
+
+// Node type
+enum NodeType {
+    HEAD = 0;
+    WORKER = 1;
+}
+
+// RustRay service
+service RustRay {
+    // Submit a task for processing
+    rpc SubmitTask(TaskSpec) returns (TaskId);
+
+    // Get task status
+    rpc GetTaskStatus(TaskId) returns (TaskStatusResponse);
+
+    // Get task result
+    rpc GetTaskResult(TaskId) returns (TaskResult);
+
+    // Register worker node
+    rpc RegisterWorker(NodeInfo) returns (RegisterResponse);
+
+    // Worker heartbeat
+    rpc WorkerHeartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+}
+
+// Task ID message
+message TaskId {
+    string id = 1;
+}
+
+// Task status response
+message TaskStatusResponse {
+    string task_id = 1;
+    TaskStatus status = 2;
+}
+
+// Register response
+message RegisterResponse {
+    bool success = 1;
+    string error = 2;
+}
+
+// Heartbeat request
+message HeartbeatRequest {
+    string node_id = 1;
+    TaskRequiredResources resources = 2;
+}
+
+// Heartbeat response
+message HeartbeatResponse {
+    bool success = 1;
+    string error = 2;
+} 
