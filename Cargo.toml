@@ -15,6 +15,10 @@ path = "examples/matrix/matrix_multiply.rs"
 name = "prime_finder"
 path = "examples/prime/prime_finder.rs"
 
+[[example]]
+name = "image_filter"
+path = "examples/image_processing/image_filter.rs"
+
 [profile.dev]
 opt-level = 1
 debug = true
