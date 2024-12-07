@@ -53,6 +53,7 @@ fn create_api_routes(
         .route("/api/metrics/memory", get(api::system::get_memory_metrics))
         .route("/api/metrics/network", get(api::system::get_network_metrics))
         .route("/api/metrics/storage", get(api::system::get_storage_metrics))
+        .route("/api/tasks/status", get(api::system::get_task_status))
         .with_state(app_state)
 }
 

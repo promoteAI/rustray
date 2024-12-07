@@ -84,6 +84,14 @@ struct CachedMetrics {
     last_updated: Instant,
 }
 
+#[derive(Debug, Clone)]
+pub struct Task {
+    pub id: String,
+    pub status: String,
+    pub progress: f32,
+    pub created_at: String,
+}
+
 impl WorkerNode {
     const METRICS_CACHE_DURATION: Duration = Duration::from_secs(5);
     
@@ -176,9 +184,8 @@ impl WorkerNode {
 
     /// 获取集群节点数量
     pub async fn get_cluster_node_count(&self) -> usize {
-        // 实现获取集群节点数量的逻辑
-        // 可以通过与头节点通信或内部状态获取
-        0
+        // 目前只返回1，因为我们只有一个worker节点
+        1
     }
 
     /// 获取正在运行的任务数量
@@ -189,12 +196,11 @@ impl WorkerNode {
 
     /// 获取系统负载
     pub async fn get_system_load(&self) -> String {
-        let mut system = System::new_all();
-        system.refresh_all();
-
-        // 获取 1 分钟平均负载
-        let load_avg = system.load_average();
-        format!("{:.2}%", load_avg.one * 100.0)
+        // 使用 sys-info 获取系统负载
+        match sys_info::loadavg() {
+            Ok(load) => format!("{:.2}, {:.2}, {:.2}", load.one, load.five, load.fifteen),
+            Err(_) => "N/A".to_string(),
+        }
     }
 
     /// 获取 CPU 指标
@@ -334,5 +340,35 @@ impl WorkerNode {
     /// 获取节点ID
     pub fn get_node_id(&self) -> &str {
         &self.node_id
+    }
+
+    pub async fn get_running_tasks(&self) -> Vec<Task> {
+        let running_tasks = self.running_tasks.read().await;
+        running_tasks
+            .iter()
+            .map(|(id, task)| Task {
+                id: id.clone(),
+                status: task.status.to_string(),
+                progress: task.progress,
+                created_at: task.created_at.to_rfc3339(),
+            })
+            .collect()
+    }
+
+    pub async fn get_running_tasks_count(&self) -> usize {
+        self.running_tasks.read().await.len()
+    }
+
+    pub async fn get_cluster_node_count(&self) -> usize {
+        // 目前只返回1，因为我们只有一个worker节点
+        1
+    }
+
+    pub async fn get_system_load(&self) -> String {
+        // 使用 sys-info 获取系统负载
+        match sys_info::loadavg() {
+            Ok(load) => format!("{:.2}, {:.2}, {:.2}", load.one, load.five, load.fifteen),
+            Err(_) => "N/A".to_string(),
+        }
     }
 }

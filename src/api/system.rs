@@ -127,3 +127,41 @@ pub async fn get_system_status(
 
     (StatusCode::OK, Json(response))
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TaskStatusResponse {
+    pub tasks: Vec<TaskInfo>,
+    pub total_count: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TaskInfo {
+    pub id: String,
+    pub status: String,
+    pub progress: f32,
+    pub created_at: String,
+}
+
+// 获取任务状态
+pub async fn get_task_status(
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let worker = state.worker.clone();
+    let tasks = worker.get_running_tasks().await;
+    
+    let task_infos: Vec<TaskInfo> = tasks.into_iter().map(|task| {
+        TaskInfo {
+            id: task.id,
+            status: task.status,
+            progress: task.progress,
+            created_at: task.created_at,
+        }
+    }).collect();
+
+    let response = TaskStatusResponse {
+        tasks: task_infos,
+        total_count: task_infos.len(),
+    };
+
+    (StatusCode::OK, Json(response))
+}
