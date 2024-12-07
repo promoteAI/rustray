@@ -100,26 +100,34 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // 收集所有结果
     let mut all_primes = Vec::new();
     for (task_id, chunk_start, chunk_end) in results {
-        if let Some(result) = head.get_task_result(&task_id).await? {
-            match result {
-                TaskResult::Completed(data) => {
-                    let primes: Vec<u64> = bincode::deserialize(&data)?;
-                    all_primes.extend(primes);
-                    completed_chunks += 1;
-                    println!(
-                        "Progress: {:.1}% ({}/{}) - Found {} primes in range {} to {}", 
-                        (completed_chunks as f64 / total_chunks as f64) * 100.0,
-                        completed_chunks,
-                        total_chunks,
-                        all_primes.len(),
-                        chunk_start,
-                        chunk_end
-                    );
+        match head.get_task_result(&task_id).await {
+            Ok(Some(result)) => {
+                match result {
+                    TaskResult::Completed(data) => {
+                        let primes: Vec<u64> = bincode::deserialize(&data)?;
+                        all_primes.extend(primes);
+                        completed_chunks += 1;
+                        println!(
+                            "Progress: {:.1}% ({}/{}) - Found {} primes in range {} to {}", 
+                            (completed_chunks as f64 / total_chunks as f64) * 100.0,
+                            completed_chunks,
+                            total_chunks,
+                            all_primes.len(),
+                            chunk_start,
+                            chunk_end
+                        );
+                    }
+                    TaskResult::Failed(err) => {
+                        eprintln!("Task failed for range {} to {}: {}", chunk_start, chunk_end, err);
+                    }
+                    _ => {}
                 }
-                TaskResult::Failed(err) => {
-                    eprintln!("Task failed for range {} to {}: {}", chunk_start, chunk_end, err);
-                }
-                _ => {}
+            }
+            Ok(None) => {
+                eprintln!("Task result for {} to {} is not available yet.", chunk_start, chunk_end);
+            }
+            Err(err) => {
+                eprintln!("Error fetching task result for range {} to {}: {}", chunk_start, chunk_end, err);
             }
         }
     }
