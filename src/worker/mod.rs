@@ -13,13 +13,14 @@ use crate::metrics::MetricsCollector;
 
 /// Worker node for executing tasks
 pub struct WorkerNode {
-    node_id: Uuid,
+    node_id: String,
     address: String,
     port: u16,
     running_tasks: RwLock<HashMap<String, RunningTask>>,
     data_cache: RwLock<HashMap<String, CachedData>>,
     metrics: Arc<MetricsCollector>,
     cached_metrics: Mutex<CachedMetrics>,
+    start_time: Instant,
 }
 
 #[derive(Debug)]
@@ -89,7 +90,7 @@ impl WorkerNode {
     /// Create a new worker node
     pub fn new(address: String, port: u16, metrics: Arc<MetricsCollector>) -> Self {
         Self {
-            node_id: Uuid::new_v4(),
+            node_id: Uuid::new_v4().to_string(),
             address,
             port,
             running_tasks: RwLock::new(HashMap::new()),
@@ -120,6 +121,7 @@ impl WorkerNode {
                 },
                 last_updated: Instant::now(),
             }),
+            start_time: Instant::now(),
         }
     }
 
@@ -316,5 +318,21 @@ impl WorkerNode {
         } else {
             Err("Failed to acquire metrics lock".to_string())
         }
+    }
+
+    /// 获取节点状态
+    pub async fn get_node_status(&self) -> String {
+        // 实现获取节点状态的逻辑
+        "Node is running".to_string()
+    }
+
+    /// 获取节点运行时间
+    pub async fn get_uptime(&self) -> u64 {
+        self.start_time.elapsed().as_secs()
+    }
+
+    /// 获取节点ID
+    pub fn get_node_id(&self) -> &str {
+        &self.node_id
     }
 }

@@ -18,6 +18,16 @@ pub struct SystemOverviewResponse {
     pub system_load: String,
 }
 
+// 系统状态响应结构体
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SystemStatusResponse {
+    pub status: String,
+    pub uptime: u64,
+    pub node_type: String,
+    pub node_id: String,
+    pub version: String,
+}
+
 // 获取系统概览
 pub async fn get_system_overview(
     State(state): State<AppState>,
@@ -97,4 +107,23 @@ pub async fn get_storage_metrics(
     let worker = state.worker.clone();
     let storage_metrics = worker.get_storage_metrics().await;
     (StatusCode::OK, Json(storage_metrics))
+}
+
+// 获取系统状态
+pub async fn get_system_status(
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let worker = state.worker.clone();
+    let node_id = worker.get_node_id().to_string();
+    let uptime = worker.get_uptime().await;
+    
+    let response = SystemStatusResponse {
+        status: "running".to_string(),
+        uptime,
+        node_type: "worker".to_string(),
+        node_id,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    };
+
+    (StatusCode::OK, Json(response))
 }

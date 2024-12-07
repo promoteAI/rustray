@@ -46,6 +46,7 @@ fn create_api_routes(
     };
 
     Router::new()
+        .route("/api/system/status", get(api::system::get_system_status))
         .route("/api/system/overview", get(api::system::get_system_overview))
         .route("/api/system/metrics", get(api::system::get_system_metrics))
         .route("/api/metrics/cpu", get(api::system::get_cpu_metrics))
