@@ -2,79 +2,262 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use axum::Router;
-use tokio::signal;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use std::time::Duration;
+
+use clap::{Parser, ValueEnum};
+use tokio::{signal, sync::mpsc};
+use tonic::transport::Server;
+use tracing::{info, warn, error, Level};
+use tracing_subscriber::FmtSubscriber;
 
 use rustray::{
-    api::system,
-    metrics::MetricsCollector,
+    proto::rust_ray_server::RustRayServer,
+    grpc::RustRayService,
+    head::{HeadNode, HeadNodeConfig},
     worker::WorkerNode,
-    AppState,
+    error::Result,
+    common::object_store::ObjectStore,
+    metrics::MetricsCollector,
 };
 
-#[tokio::main]
-async fn main() {
-    // Initialize logging
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::new(
-            std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
-        ))
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+mod api;
 
-    // Create MetricsCollector
-    let metrics = MetricsCollector::new();
-    let metrics_arc = Arc::new(metrics.clone());
-    
-    // Create WorkerNode
-    let worker = WorkerNode::new(
-        "127.0.0.1".to_string(),
-        50051,
-        metrics_arc,
-    );
+use axum::{
+    routing::get,
+    Router,
+};
 
-    // Create application state
-    let state = AppState::new(metrics, worker);
-
-    // Create router
-    let app = Router::new()
-        .merge(system::router())
-        .with_state(state);
-
-    // Start server
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
-    tracing::info!("listening on {}", addr);
-    
-    axum::Server::bind(&addr)
-        .serve(app.into_make_service())
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .unwrap();
+#[derive(Clone)]
+struct AppState {
+    metrics: Arc<MetricsCollector>,
+    worker: Arc<WorkerNode>,
 }
 
+unsafe impl Send for AppState {}
+unsafe impl Sync for AppState {}
+
+fn create_api_routes(
+    metrics: Arc<MetricsCollector>,
+    worker: Arc<WorkerNode>,
+) -> Router {
+    let app_state = AppState {
+        metrics: metrics.clone(),
+        worker: worker.clone(),
+    };
+
+    Router::new()
+        .route("/api/system/status", get(api::system::get_system_status))
+        .route("/api/system/overview", get(api::system::get_system_overview))
+        .route("/api/system/metrics", get(api::system::get_system_metrics))
+        .route("/api/metrics/cpu", get(api::system::get_cpu_metrics))
+        .route("/api/metrics/memory", get(api::system::get_memory_metrics))
+        .route("/api/metrics/network", get(api::system::get_network_metrics))
+        .route("/api/metrics/storage", get(api::system::get_storage_metrics))
+        .route("/api/tasks/status", get(api::system::get_task_status))
+        .with_state(app_state)
+}
+
+/// Command-line arguments for RustRay nodes
+#[derive(Parser, Debug)]
+#[command(
+    name = "RustRay",
+    version = "0.1.0",
+    about = "Distributed task processing framework",
+    long_about = "A high-performance distributed computing framework"
+)]
+struct Args {
+    /// Type of node to run
+    #[arg(short, long, value_enum)]
+    node_type: NodeType,
+
+    /// Port to listen on
+    #[arg(short, long, default_value_t = 8000)]
+    port: u16,
+
+    /// Head node address (for worker nodes)
+    #[arg(short, long, default_value = "127.0.0.1:8000")]
+    head_addr: String,
+
+    /// Log level
+    #[arg(long, default_value = "info")]
+    log_level: String,
+}
+
+/// Node type for distributed computing
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
+enum NodeType {
+    Head,
+    Worker,
+}
+
+/// Initialize logging with dynamic log level
+fn setup_logging(level: &str) -> Result<()> {
+    let log_level = match level.to_lowercase().as_str() {
+        "trace" => Level::TRACE,
+        "debug" => Level::DEBUG,
+        "info" => Level::INFO,
+        "warn" => Level::WARN,
+        "error" => Level::ERROR,
+        _ => {
+            warn!("Invalid log level '{}', defaulting to INFO", level);
+            Level::INFO
+        }
+    };
+
+    let subscriber = FmtSubscriber::builder()
+        .with_max_level(log_level)
+        .with_target(false)
+        .with_thread_ids(true)
+        .with_thread_names(true)
+        .compact()
+        .finish();
+
+    tracing::subscriber::set_global_default(subscriber)
+        .map_err(|e| anyhow::anyhow!("Failed to set logging subscriber: {}", e))?;
+
+    Ok(())
+}
+
+/// Graceful shutdown handler
 async fn shutdown_signal() {
     let ctrl_c = async {
         signal::ctrl_c()
             .await
-            .expect("failed to install Ctrl+C handler");
+            .expect("Failed to install Ctrl+C handler")
     };
 
     #[cfg(unix)]
     let terminate = async {
         signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("failed to install signal handler")
+            .expect("Failed to install terminate signal handler")
             .recv()
-            .await;
+            .await
     };
 
     #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
+    let terminate = std::future::pending();
 
     tokio::select! {
-        _ = ctrl_c => {},
-        _ = terminate => {},
+        _ = ctrl_c => info!("Received Ctrl+C, initiating shutdown"),
+        _ = terminate => info!("Received termination signal, initiating shutdown"),
+    }
+}
+
+/// Main application entry point
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Parse command-line arguments
+    let args = Args::parse();
+
+    // Setup logging
+    setup_logging(&args.log_level)?;
+
+    // Configure server address
+    let addr: SocketAddr = format!("0.0.0.0:{}", args.port)
+        .parse()
+        .map_err(|e| anyhow::anyhow!("Invalid address: {}", e))?;
+
+    // Spawn shutdown signal handler
+    let shutdown_handle = tokio::spawn(shutdown_signal());
+
+    match args.node_type {
+        NodeType::Head => {
+            info!("Starting head node on {}", addr);
+            
+            // Create shared components
+            let object_store = Arc::new(ObjectStore::new("default".to_string()));
+            let metrics = Arc::new(MetricsCollector::new());
+            let (status_tx, _status_rx) = mpsc::channel(100);
+
+            // Create head node configuration
+            let config = HeadNodeConfig {
+                address: addr.ip().to_string(),
+                port: addr.port(),
+                heartbeat_timeout: Duration::from_secs(30),
+                resource_monitor_interval: Duration::from_secs(10),
+                scheduling_strategy: rustray::scheduler::LoadBalanceStrategy::RoundRobin,
+            };
+
+            // Create head node
+            let head = HeadNode::new(
+                config,
+                object_store,
+                metrics.clone(),
+                status_tx,
+            );
+
+            // Create worker node for local tasks
+            let worker = Arc::new(WorkerNode::new(
+                addr.ip().to_string(),
+                addr.port(),
+                metrics.clone(),
+            ));
+
+            // Create API routes
+            let app = create_api_routes(metrics.clone(), worker.clone());
+
+            // Create gRPC service
+            let service = RustRayService::new(head, worker);
+            
+            // Start both HTTP and gRPC servers
+            let grpc_addr = SocketAddr::new(addr.ip(), addr.port() + 1);
+            
+            // Run HTTP and gRPC servers concurrently
+            tokio::select! {
+                res = axum::Server::bind(&addr)
+                    .serve(app.into_make_service()) => {
+                    if let Err(e) = res {
+                        error!("HTTP server error: {}", e);
+                        return Err(e.into());
+                    }
+                }
+                res = Server::builder()
+                    .add_service(RustRayServer::new(service))
+                    .serve_with_shutdown(grpc_addr, async {
+                        shutdown_handle.await.ok();
+                    }) => {
+                    if let Err(e) = res {
+                        error!("gRPC server error: {}", e);
+                        return Err(e.into());
+                    }
+                }
+                _ = shutdown_handle => {
+                    info!("Shutdown signal received");
+                }
+            }
+        }
+        NodeType::Worker => {
+            info!("Starting worker node on {} (head: {})", addr, args.head_addr);
+            
+            // Create metrics collector
+            let metrics = Arc::new(MetricsCollector::new());
+
+            // Create worker node
+            let worker = Arc::new(WorkerNode::new(
+                addr.ip().to_string(),
+                addr.port(),
+                metrics.clone(),
+            ));
+
+            // Create API routes
+            let app = create_api_routes(metrics.clone(), worker.clone());
+
+            // Start HTTP server
+            tokio::select! {
+                res = axum::Server::bind(&addr)
+                    .serve(app.into_make_service()) => {
+                    if let Err(e) = res {
+                        error!("HTTP server error: {}", e);
+                        return Err(e.into());
+                    }
+                }
+                _ = shutdown_handle => {
+                    info!("Shutdown signal received");
+                }
+            }
+        }
     }
 
-    tracing::info!("signal received, starting graceful shutdown");
+    info!("Node shutdown complete");
+    Ok(())
 } 
