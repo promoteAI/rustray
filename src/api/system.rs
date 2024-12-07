@@ -8,8 +8,9 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 // 直接引用模块
-use metrics::collector::MetricsCollector;
-use worker::WorkerNode;
+use crate::metrics::collector::MetricsCollector;
+use crate::worker::WorkerNode;
+use crate::AppState;
 
 // 系统概览响应结构体
 #[derive(Debug, Serialize, Deserialize)]
@@ -110,9 +111,9 @@ pub async fn get_cpu_metrics(
 
 // 获取内存指标
 pub async fn get_memory_metrics(
-    State(state): State<AppState>,
+    State(worker): State<Arc<WorkerNode>>,
 ) -> impl IntoResponse {
-    let memory_metrics = state.worker.get_memory_metrics().await;
+    let memory_metrics = worker.get_memory_metrics().await;
     (StatusCode::OK, Json(memory_metrics))
 }
 
