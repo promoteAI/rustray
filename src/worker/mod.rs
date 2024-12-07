@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use uuid::Uuid;
+use sysinfo::{System, SystemExt, CpuExt};
+use std::sync::Mutex;
 
 use crate::common::{TaskSpec, TaskResult, TaskRequiredResources};
 use crate::error::Result;
@@ -16,6 +18,7 @@ pub struct WorkerNode {
     running_tasks: RwLock<HashMap<String, RunningTask>>,
     data_cache: RwLock<HashMap<String, CachedData>>,
     metrics: Arc<MetricsCollector>,
+    cached_metrics: Mutex<CachedMetrics>,
 }
 
 #[derive(Debug)]
@@ -62,7 +65,17 @@ pub struct StorageMetricsResponse {
     pub usage_percentage: f32,
 }
 
+#[derive(Debug)]
+pub struct SystemMetricsResponse {
+    pub cpu: CPUMetricsResponse,
+    pub memory: MemoryMetricsResponse,
+    pub network: NetworkMetricsResponse,
+    pub storage: StorageMetricsResponse,
+}
+
 impl WorkerNode {
+    const METRICS_CACHE_DURATION: Duration = Duration::from_secs(5);
+    
     /// Create a new worker node
     pub fn new(address: String, port: u16, metrics: Arc<MetricsCollector>) -> Self {
         Self {
@@ -72,6 +85,31 @@ impl WorkerNode {
             running_tasks: RwLock::new(HashMap::new()),
             data_cache: RwLock::new(HashMap::new()),
             metrics,
+            cached_metrics: Mutex::new(CachedMetrics {
+                cpu: CPUMetricsResponse {
+                    usage: vec![],
+                    cores: 0,
+                },
+                memory: MemoryMetricsResponse {
+                    total: 0,
+                    used: 0,
+                    free: 0,
+                    usage_percentage: 0.0,
+                },
+                network: NetworkMetricsResponse {
+                    bytes_sent: 0,
+                    bytes_recv: 0,
+                    packets_sent: 0,
+                    packets_recv: 0,
+                },
+                storage: StorageMetricsResponse {
+                    total: 0,
+                    used: 0,
+                    free: 0,
+                    usage_percentage: 0.0,
+                },
+                last_updated: Instant::now(),
+            }),
         }
     }
 
@@ -139,50 +177,131 @@ impl WorkerNode {
 
     /// 获取系统负载
     pub async fn get_system_load(&self) -> String {
-        // 实现获取系统负载的逻辑
-        // 可以使用 sysinfo 或其他系统信息库
-        "0%".to_string()
+        let mut system = System::new_all();
+        system.refresh_all();
+
+        // 获取 1 分钟平均负载
+        let load_avg = system.load_average();
+        format!("{:.2}%", load_avg.one * 100.0)
     }
 
     /// 获取 CPU 指标
     pub async fn get_cpu_metrics(&self) -> CPUMetricsResponse {
-        // 实现获取 CPU 指标的逻辑
+        let mut system = System::new_all();
+        system.refresh_cpu();
+
+        let cores = system.physical_core_count().unwrap_or(0);
+        let usage = system.cpus()
+            .iter()
+            .map(|cpu| cpu.cpu_usage())
+            .collect::<Vec<f64>>();
+
         CPUMetricsResponse {
-            usage: vec![0.0, 0.0, 0.0],
-            cores: num_cpus::get(),
+            usage,
+            cores,
         }
     }
 
     /// 获取内存指标
     pub async fn get_memory_metrics(&self) -> MemoryMetricsResponse {
-        // 实现获取内存指标的逻辑
+        let mut system = System::new_all();
+        system.refresh_memory();
+
+        let total = system.total_memory();
+        let used = system.used_memory();
+        let free = system.free_memory();
+        let usage_percentage = (used as f64 / total as f64) * 100.0;
+
         MemoryMetricsResponse {
-            total: 0,
-            used: 0,
-            free: 0,
-            usage_percentage: 0.0,
+            total,
+            used,
+            free,
+            usage_percentage,
         }
     }
 
     /// 获取网络指标
     pub async fn get_network_metrics(&self) -> NetworkMetricsResponse {
-        // 实现获取网络指标的逻辑
+        let mut system = System::new_all();
+        system.refresh_networks();
+
+        let networks = system.networks();
+        let (bytes_sent, bytes_recv, packets_sent, packets_recv) = networks
+            .iter()
+            .fold((0, 0, 0, 0), |(bs, br, ps, pr), (_, network)| {
+                (
+                    bs + network.get_transmitted(),
+                    br + network.get_received(),
+                    ps + network.get_packets_transmitted(),
+                    pr + network.get_packets_received(),
+                )
+            });
+
         NetworkMetricsResponse {
-            bytes_sent: 0,
-            bytes_recv: 0,
-            packets_sent: 0,
-            packets_recv: 0,
+            bytes_sent,
+            bytes_recv,
+            packets_sent,
+            packets_recv,
         }
     }
 
     /// 获取存储指标
     pub async fn get_storage_metrics(&self) -> StorageMetricsResponse {
-        // 实现获取存储指标的逻辑
-        StorageMetricsResponse {
-            total: 0,
-            used: 0,
-            free: 0,
-            usage_percentage: 0.0,
+        let mut system = System::new_all();
+        system.refresh_disks();
+
+        // 获取根目录磁盘信息
+        if let Some(disk) = system.disks().first() {
+            let total = disk.total_space();
+            let free = disk.available_space();
+            let used = total - free;
+            let usage_percentage = (used as f64 / total as f64) * 100.0;
+
+            StorageMetricsResponse {
+                total,
+                used,
+                free,
+                usage_percentage,
+            }
+        } else {
+            StorageMetricsResponse {
+                total: 0,
+                used: 0,
+                free: 0,
+                usage_percentage: 0.0,
+            }
+        }
+    }
+
+    fn get_cached_metrics(&self) -> Option<SystemMetricsResponse> {
+        let cached = self.cached_metrics.lock().ok()?;
+        
+        if cached.last_updated.elapsed() < Self::METRICS_CACHE_DURATION {
+            Some(SystemMetricsResponse {
+                cpu: cached.cpu.clone(),
+                memory: cached.memory.clone(),
+                network: cached.network.clone(),
+                storage: cached.storage.clone(),
+            })
+        } else {
+            None
+        }
+    }
+
+    async fn update_cached_metrics(&self) {
+        let metrics = SystemMetricsResponse {
+            cpu: self.get_cpu_metrics().await,
+            memory: self.get_memory_metrics().await,
+            network: self.get_network_metrics().await,
+            storage: self.get_storage_metrics().await,
+        };
+
+        if let Ok(mut cached) = self.cached_metrics.lock() {
+            cached.cpu = metrics.cpu;
+            cached.memory = metrics.memory;
+            cached.network = metrics.network;
+            cached.storage = metrics.storage;
+            cached.last_updated = Instant::now();
         }
     }
 }

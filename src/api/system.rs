@@ -6,6 +6,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tracing::{error, warn};
 
 // 直接引用模块
 use crate::metrics::collector::MetricsCollector;
@@ -83,22 +84,29 @@ pub async fn get_system_overview(
 
 // 获取系统指标
 pub async fn get_system_metrics(
-    State(metrics): State<Arc<MetricsCollector>>,
-    State(worker): State<Arc<WorkerNode>>,
-) -> impl IntoResponse {
-    let cpu_metrics = worker.get_cpu_metrics().await;
-    let memory_metrics = worker.get_memory_metrics().await;
-    let network_metrics = worker.get_network_metrics().await;
-    let storage_metrics = worker.get_storage_metrics().await;
-
-    let response = SystemMetricsResponse {
-        cpu: cpu_metrics,
-        memory: memory_metrics,
-        network: network_metrics,
-        storage: storage_metrics,
-    };
-
-    (StatusCode::OK, Json(response))
+    State(state): State<AppState>
+) -> Result<Json<SystemMetricsResponse>, (StatusCode, String)> {
+    let worker = state.worker_node.clone();
+    
+    match worker.get_cached_metrics() {
+        Some(cached_metrics) => Ok(Json(cached_metrics)),
+        None => {
+            match worker.update_cached_metrics().await {
+                Ok(_) => {
+                    worker.get_cached_metrics()
+                        .map(Json)
+                        .ok_or_else(|| {
+                            error!("Failed to retrieve system metrics after update");
+                            (StatusCode::INTERNAL_SERVER_ERROR, "Metrics retrieval failed".to_string())
+                        })
+                },
+                Err(e) => {
+                    error!("Error updating system metrics: {:?}", e);
+                    Err((StatusCode::INTERNAL_SERVER_ERROR, "Metrics update failed".to_string()))
+                }
+            }
+        }
+    }
 }
 
 // 获取 CPU 指标
