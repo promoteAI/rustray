@@ -1,6 +1,5 @@
 //! RustRay Distributed Task Processing Framework
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -185,10 +184,31 @@ async fn main() -> Result<()> {
 
             let object_store = Arc::new(ObjectStore::new("default".to_string()));
             let metrics = Arc::new(MetricsCollector::new());
-            let (status_tx, _) = mpsc::channel(100);
+            let (status_tx, mut status_rx) = mpsc::channel(100);
 
-            let head = HeadNode::new(config, object_store, metrics.clone(), status_tx);
-            head.start().await?;
+            let head = HeadNode::new(
+                config, 
+                object_store, 
+                metrics.clone(), 
+                status_tx
+            );
+
+            tokio::spawn(async move {
+                while let Some(status) = status_rx.recv().await {
+                    info!("Node status update: {:?}", status);
+                }
+            });
+
+            let head_result = head.start().await;
+            match head_result {
+                Ok(_) => {
+                    info!("HeadNode started successfully");
+                }
+                Err(e) => {
+                    error!("Failed to start HeadNode: {}", e);
+                    return Err(e);
+                }
+            }
 
             let worker = Arc::new(WorkerNode::new(
                 "0.0.0.0".to_string(),
