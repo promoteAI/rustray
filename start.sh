@@ -21,13 +21,11 @@ DEFAULT_HEAD_ADDR="localhost:8000"
 
 # 帮助信息
 show_help() {
-    echo "Usage:"
-    echo "  Start head node:    ./start.sh head [port]"
-    echo "  Start worker node:  ./start.sh worker [head-address] [port]"
+    echo "Usage: ./scripts/start.sh [head|worker] [port]"
     echo ""
     echo "Examples:"
-    echo "  ./start.sh head 8000"
-    echo "  ./start.sh worker localhost:8000 8001"
+    echo "  ./scripts/start.sh head 8000"
+    echo "  ./scripts/start.sh worker 8001"
 }
 
 # 启动头节点
