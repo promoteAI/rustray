@@ -74,6 +74,7 @@ rand = { version = "0.8", features = ["std"] }
 
 # CPU metrics
 num_cpus = "1.13"
+sysinfo = "0.29"
 
 # Web framework
 axum = "0.6"

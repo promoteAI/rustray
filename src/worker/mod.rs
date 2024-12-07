@@ -3,8 +3,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use uuid::Uuid;
-use sysinfo::{System, SystemExt, CpuExt};
+use sysinfo::{System, SystemExt, CpuExt, NetworksExt, DiskExt, NetworkExt};
 use std::sync::Mutex;
+use serde;
 
 use crate::common::{TaskSpec, TaskResult, TaskRequiredResources};
 use crate::error::Result;
@@ -35,21 +36,21 @@ struct CachedData {
     last_used: Instant,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CPUMetricsResponse {
-    pub usage: Vec<f32>,
+    pub usage: Vec<f64>,
     pub cores: usize,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MemoryMetricsResponse {
     pub total: u64,
     pub used: u64,
     pub free: u64,
-    pub usage_percentage: f32,
+    pub usage_percentage: f64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NetworkMetricsResponse {
     pub bytes_sent: u64,
     pub bytes_recv: u64,
@@ -57,20 +58,29 @@ pub struct NetworkMetricsResponse {
     pub packets_recv: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StorageMetricsResponse {
     pub total: u64,
     pub used: u64,
     pub free: u64,
-    pub usage_percentage: f32,
+    pub usage_percentage: f64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SystemMetricsResponse {
     pub cpu: CPUMetricsResponse,
     pub memory: MemoryMetricsResponse,
     pub network: NetworkMetricsResponse,
     pub storage: StorageMetricsResponse,
+}
+
+#[derive(Debug)]
+struct CachedMetrics {
+    cpu: CPUMetricsResponse,
+    memory: MemoryMetricsResponse,
+    network: NetworkMetricsResponse,
+    storage: StorageMetricsResponse,
+    last_updated: Instant,
 }
 
 impl WorkerNode {
@@ -193,7 +203,7 @@ impl WorkerNode {
         let cores = system.physical_core_count().unwrap_or(0);
         let usage = system.cpus()
             .iter()
-            .map(|cpu| cpu.cpu_usage())
+            .map(|cpu| cpu.cpu_usage() as f64)
             .collect::<Vec<f64>>();
 
         CPUMetricsResponse {
@@ -230,10 +240,10 @@ impl WorkerNode {
             .iter()
             .fold((0, 0, 0, 0), |(bs, br, ps, pr), (_, network)| {
                 (
-                    bs + network.get_transmitted(),
-                    br + network.get_received(),
-                    ps + network.get_packets_transmitted(),
-                    pr + network.get_packets_received(),
+                    bs + network.transmitted(),
+                    br + network.received(),
+                    ps + network.packets_transmitted(),
+                    pr + network.packets_received(),
                 )
             });
 
@@ -273,7 +283,7 @@ impl WorkerNode {
         }
     }
 
-    fn get_cached_metrics(&self) -> Option<SystemMetricsResponse> {
+    pub fn get_cached_metrics(&self) -> Option<SystemMetricsResponse> {
         let cached = self.cached_metrics.lock().ok()?;
         
         if cached.last_updated.elapsed() < Self::METRICS_CACHE_DURATION {
@@ -288,7 +298,7 @@ impl WorkerNode {
         }
     }
 
-    async fn update_cached_metrics(&self) {
+    pub async fn update_cached_metrics(&self) -> Result<(), String> {
         let metrics = SystemMetricsResponse {
             cpu: self.get_cpu_metrics().await,
             memory: self.get_memory_metrics().await,
@@ -302,6 +312,9 @@ impl WorkerNode {
             cached.network = metrics.network;
             cached.storage = metrics.storage;
             cached.last_updated = Instant::now();
+            Ok(())
+        } else {
+            Err("Failed to acquire metrics lock".to_string())
         }
     }
 }

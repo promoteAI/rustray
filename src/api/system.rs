@@ -6,11 +6,10 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tracing::{error, warn};
+use tracing::error;
 
-// 直接引用模块
-use crate::metrics::collector::MetricsCollector;
-use crate::worker::WorkerNode;
+use rustray::metrics::MetricsCollector;
+use rustray::worker::{WorkerNode, SystemMetricsResponse};
 use crate::AppState;
 
 // 系统概览响应结构体
@@ -19,49 +18,6 @@ pub struct SystemOverviewResponse {
     pub node_count: usize,
     pub running_tasks: usize,
     pub system_load: String,
-}
-
-// CPU 指标响应结构体
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CPUMetricsResponse {
-    pub usage: Vec<f64>,
-    pub cores: usize,
-}
-
-// 内存指标响应结构体
-#[derive(Debug, Serialize, Deserialize)]
-pub struct MemoryMetricsResponse {
-    pub total: u64,
-    pub used: u64,
-    pub free: u64,
-    pub usage_percentage: f64,
-}
-
-// 网络指标响应结构体
-#[derive(Debug, Serialize, Deserialize)]
-pub struct NetworkMetricsResponse {
-    pub bytes_sent: u64,
-    pub bytes_recv: u64,
-    pub packets_sent: u64,
-    pub packets_recv: u64,
-}
-
-// 存储指标响应结构体
-#[derive(Debug, Serialize, Deserialize)]
-pub struct StorageMetricsResponse {
-    pub total: u64,
-    pub used: u64,
-    pub free: u64,
-    pub usage_percentage: f64,
-}
-
-// 系统指标响应结构体
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SystemMetricsResponse {
-    pub cpu: CPUMetricsResponse,
-    pub memory: MemoryMetricsResponse,
-    pub network: NetworkMetricsResponse,
-    pub storage: StorageMetricsResponse,
 }
 
 // 获取系统概览
@@ -86,7 +42,7 @@ pub async fn get_system_overview(
 pub async fn get_system_metrics(
     State(state): State<AppState>
 ) -> Result<Json<SystemMetricsResponse>, (StatusCode, String)> {
-    let worker = state.worker_node.clone();
+    let worker = state.worker.clone();
     
     match worker.get_cached_metrics() {
         Some(cached_metrics) => Ok(Json(cached_metrics)),
@@ -139,4 +95,4 @@ pub async fn get_storage_metrics(
 ) -> impl IntoResponse {
     let storage_metrics = worker.get_storage_metrics().await;
     (StatusCode::OK, Json(storage_metrics))
-} 
+}

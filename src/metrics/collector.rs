@@ -3,6 +3,7 @@ use std::sync::RwLock;
 use std::time::Instant;
 use crate::error::Result;
 use tracing::warn;
+use crate::worker::{SystemMetricsResponse};
 
 /// Metrics collector for system monitoring
 pub struct MetricsCollector {
@@ -94,15 +95,14 @@ impl MetricsCollector {
         self.timers.write().unwrap().clear();
     }
 
-    pub fn record_system_metrics(&self, metrics: &SystemMetricsResponse) {
+    pub async fn record_system_metrics(&self, metrics: &SystemMetricsResponse) -> Result<(), String> {
         // 记录系统级别指标
-        self.set_gauge("system.cpu.usage", metrics.cpu.usage.iter().sum::<f64>() / metrics.cpu.usage.len() as f64)
-            .unwrap_or_else(|e| warn!("Failed to record CPU usage: {}", e));
+        self.set_gauge("system.cpu.usage", metrics.cpu.usage.iter().sum::<f64>() / metrics.cpu.usage.len() as f64).await?;
         
-        self.set_gauge("system.memory.usage_percentage", metrics.memory.usage_percentage)
-            .unwrap_or_else(|e| warn!("Failed to record memory usage: {}", e));
+        self.set_gauge("system.memory.usage_percentage", metrics.memory.usage_percentage).await?;
         
-        self.set_gauge("system.network.bytes_sent", metrics.network.bytes_sent as f64)
-            .unwrap_or_else(|e| warn!("Failed to record network bytes sent: {}", e));
+        self.set_gauge("system.network.bytes_sent", metrics.network.bytes_sent as f64).await?;
+        
+        Ok(())
     }
 } 
