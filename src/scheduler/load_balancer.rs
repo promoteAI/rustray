@@ -82,15 +82,12 @@ impl LoadBalancer {
                     .await?
             }
             LoadBalanceStrategy::Custom(_) => {
-                // 自定义策略可以在这里扩展
                 Some(healthy_nodes[0].node_id)
             }
         };
 
         if selected.is_some() {
-            if let Err(e) = self.metrics.increment_counter("scheduler.tasks.assigned", 1) {
-                error!("Failed to update metrics: {}", e);
-            }
+            self.metrics.increment_counter("scheduler.tasks.assigned", 1).await;
         }
 
         Ok(selected)

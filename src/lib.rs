@@ -5,6 +5,7 @@ pub mod grpc;
 pub mod head;
 pub mod metrics;
 pub mod scheduler;
+pub mod state;
 pub mod worker;
 
 pub mod proto {
@@ -14,3 +15,4 @@ pub mod proto {
 pub use error::{Result, RustRayError};
 pub use metrics::MetricsCollector;
 pub use proto::*;
+pub use state::AppState;

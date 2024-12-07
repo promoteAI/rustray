@@ -1433,6 +1433,7 @@ dependencies = [
  "criterion",
  "futures-util",
  "http",
+ "hyper",
  "mockall",
  "num_cpus",
  "prost",

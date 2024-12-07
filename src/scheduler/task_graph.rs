@@ -35,9 +35,7 @@ impl TaskGraph {
         dependencies.insert(task_id, deps.into_iter().collect());
         status.insert(task_id, TaskStatus::Pending);
 
-        if let Err(e) = self.metrics.increment_counter("task_graph.tasks.added", 1) {
-            error!("Failed to update metrics: {}", e);
-        }
+        self.metrics.increment_counter("task_graph.tasks.added", 1).await;
 
         Ok(())
     }
@@ -65,9 +63,7 @@ impl TaskGraph {
             }
         }
 
-        if let Err(e) = self.metrics.set_gauge("task_graph.ready_tasks", ready_tasks.len() as f64) {
-            error!("Failed to update metrics: {}", e);
-        }
+        self.metrics.set_metric("task_graph.ready_tasks".to_string(), ready_tasks.len() as f64).await;
 
         Ok(ready_tasks)
     }
@@ -78,12 +74,10 @@ impl TaskGraph {
         if let Some(current_status) = status.get_mut(&task_id) {
             *current_status = new_status;
 
-            if let Err(e) = self.metrics.increment_counter(
-                &format!("task_graph.status.{:?}", new_status), 
+            self.metrics.increment_counter(
+                &format!("task_graph.status.{:?}", new_status),
                 1
-            ) {
-                error!("Failed to update metrics: {}", e);
-            }
+            ).await;
 
             Ok(())
         } else {

@@ -1,149 +1,101 @@
 use axum::{
     extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    Json,
+    response::Json,
+    routing::get,
+    Router,
 };
-use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use tracing::error;
 
 use crate::AppState;
 
-// 系统概览响应结构体
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SystemOverviewResponse {
-    pub node_count: usize,
-    pub running_tasks: usize,
-    pub system_load: String,
+pub fn router() -> Router<AppState> {
+    Router::new()
+        .route("/api/system/status", get(get_system_status))
+        .route("/api/system/metrics", get(get_system_metrics))
+        .route("/api/system/metrics/cpu", get(get_cpu_metrics))
+        .route("/api/system/metrics/memory", get(get_memory_metrics))
+        .route("/api/system/metrics/network", get(get_network_metrics))
+        .route("/api/system/metrics/storage", get(get_storage_metrics))
+        .route("/api/system/info", get(get_system_info))
+        .route("/api/system/tasks", get(get_running_tasks))
 }
 
-// 系统状态响应结构体
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SystemStatusResponse {
-    pub status: String,
-    pub uptime: u64,
-    pub node_type: String,
-    pub node_id: String,
-    pub version: String,
-}
-
-// 获取系统概览
-pub async fn get_system_overview(
+pub async fn get_system_status(
     State(state): State<AppState>,
-) -> impl IntoResponse {
-    let worker = state.worker.clone();
+) -> Json<Value> {
+    let worker = state.worker.read().await;
+    
     let node_count = worker.get_cluster_node_count().await;
     let running_tasks = worker.get_running_tasks_count().await;
     let system_load = worker.get_system_load().await;
 
-    let response = SystemOverviewResponse {
-        node_count,
-        running_tasks,
-        system_load,
-    };
-
-    (StatusCode::OK, Json(response))
+    Json(json!({
+        "status": "running",
+        "node_count": node_count,
+        "running_tasks": running_tasks,
+        "system_load": system_load,
+    }))
 }
 
-// 获取系统指标
 pub async fn get_system_metrics(
     State(state): State<AppState>,
-) -> impl IntoResponse {
-    let worker = state.worker.clone();
+) -> Json<Value> {
+    let worker = state.worker.read().await;
     let metrics = worker.get_system_metrics().await;
-    (StatusCode::OK, Json(metrics))
+    Json(json!(metrics))
 }
 
-// 获取 CPU 指标
 pub async fn get_cpu_metrics(
     State(state): State<AppState>,
-) -> impl IntoResponse {
-    let worker = state.worker.clone();
+) -> Json<Value> {
+    let worker = state.worker.read().await;
     let cpu_metrics = worker.get_cpu_metrics().await;
-    (StatusCode::OK, Json(cpu_metrics))
+    Json(json!(cpu_metrics))
 }
 
-// 获取内存指标
 pub async fn get_memory_metrics(
     State(state): State<AppState>,
-) -> impl IntoResponse {
-    let worker = state.worker.clone();
+) -> Json<Value> {
+    let worker = state.worker.read().await;
     let memory_metrics = worker.get_memory_metrics().await;
-    (StatusCode::OK, Json(memory_metrics))
+    Json(json!(memory_metrics))
 }
 
-// 获取网络指标
 pub async fn get_network_metrics(
     State(state): State<AppState>,
-) -> impl IntoResponse {
-    let worker = state.worker.clone();
+) -> Json<Value> {
+    let worker = state.worker.read().await;
     let network_metrics = worker.get_network_metrics().await;
-    (StatusCode::OK, Json(network_metrics))
+    Json(json!(network_metrics))
 }
 
-// 获取存储指标
 pub async fn get_storage_metrics(
     State(state): State<AppState>,
-) -> impl IntoResponse {
-    let worker = state.worker.clone();
+) -> Json<Value> {
+    let worker = state.worker.read().await;
     let storage_metrics = worker.get_storage_metrics().await;
-    (StatusCode::OK, Json(storage_metrics))
+    Json(json!(storage_metrics))
 }
 
-// 获取系统状态
-pub async fn get_system_status(
+pub async fn get_system_info(
     State(state): State<AppState>,
-) -> impl IntoResponse {
-    let worker = state.worker.clone();
+) -> Json<Value> {
+    let worker = state.worker.read().await;
     let node_id = worker.get_node_id().to_string();
     let uptime = worker.get_uptime().await;
-    
-    let response = SystemStatusResponse {
-        status: "running".to_string(),
-        uptime,
-        node_type: "worker".to_string(),
-        node_id,
-        version: env!("CARGO_PKG_VERSION").to_string(),
-    };
 
-    (StatusCode::OK, Json(response))
+    Json(json!({
+        "node_id": node_id,
+        "uptime": uptime,
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct TaskStatusResponse {
-    pub tasks: Vec<TaskInfo>,
-    pub total_count: usize,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct TaskInfo {
-    pub id: String,
-    pub status: String,
-    pub progress: f32,
-    pub created_at: String,
-}
-
-// 获取任务状态
-pub async fn get_task_status(
+pub async fn get_running_tasks(
     State(state): State<AppState>,
-) -> impl IntoResponse {
-    let worker = state.worker.clone();
+) -> Json<Value> {
+    let worker = state.worker.read().await;
     let tasks = worker.get_running_tasks().await;
-    
-    let task_infos: Vec<TaskInfo> = tasks.into_iter().map(|task| {
-        TaskInfo {
-            id: task.id,
-            status: task.status,
-            progress: task.progress,
-            created_at: task.created_at,
-        }
-    }).collect();
-
-    let total_count = task_infos.len();
-    let response = TaskStatusResponse {
-        tasks: task_infos,
-        total_count,
-    };
-
-    (StatusCode::OK, Json(response))
+    Json(json!(tasks))
 }
