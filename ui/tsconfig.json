@@ -23,15 +23,14 @@
     ],
     "types": [
       "vue",
-      "vite/client"
+      "vite/client",
+      "node"
     ]
   },
   "include": [
     "src/**/*.ts",
     "src/**/*.tsx",
     "src/**/*.vue",
-    "tests/**/*.ts",
-    "tests/**/*.tsx",
     "env.d.ts"
   ],
   "exclude": [
