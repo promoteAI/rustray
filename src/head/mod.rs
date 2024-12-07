@@ -32,6 +32,18 @@ pub struct HeadNodeConfig {
     pub scheduling_strategy: LoadBalanceStrategy,
 }
 
+impl Default for HeadNodeConfig {
+    fn default() -> Self {
+        Self {
+            address: "0.0.0.0".to_string(),
+            port: 8000,
+            heartbeat_timeout: Duration::from_secs(30),
+            resource_monitor_interval: Duration::from_secs(10),
+            scheduling_strategy: LoadBalanceStrategy::RoundRobin,
+        }
+    }
+}
+
 /// Head node state
 #[derive(Debug, Clone, PartialEq)]
 pub enum HeadNodeState {
@@ -68,6 +80,17 @@ pub struct HeadNode {
     status_tx: mpsc::Sender<ClusterStatus>,
     background_tasks: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>>,
     scheduler_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
+}
+
+impl Default for HeadNode {
+    fn default() -> Self {
+        let config = HeadNodeConfig::default();
+        let object_store = Arc::new(ObjectStore::new("default".to_string()));
+        let metrics = Arc::new(MetricsCollector::new());
+        let (status_tx, _) = mpsc::channel(100);
+
+        Self::new(config, object_store, metrics, status_tx)
+    }
 }
 
 /// Worker node information
@@ -161,7 +184,7 @@ impl HeadNode {
         self.load_balancer.register_node(worker).await
             .map_err(|e| RustRayError::InternalError(e.to_string()))?;
 
-        self.metrics.increment_counter("head.workers.registered", 1)?;
+        self.metrics.increment_counter("head.workers.registered", 1).await;
 
         self.update_status().await?;
         info!("Worker node registered successfully");
@@ -180,7 +203,7 @@ impl HeadNode {
             if let Some(_worker) = workers.get(&worker_id) {
                 // TODO: Implement task sending logic
                 
-                self.metrics.increment_counter("head.tasks.submitted", 1)?;
+                self.metrics.increment_counter("head.tasks.submitted", 1).await;
             }
         }
 
@@ -202,7 +225,7 @@ impl HeadNode {
                 .await
                 .map_err(|e| RustRayError::InternalError(e.to_string()))?;
 
-            self.metrics.increment_counter("head.heartbeats.received", 1)?;
+            self.metrics.increment_counter("head.heartbeats.received", 1).await;
         }
 
         self.update_status().await?;
@@ -240,17 +263,16 @@ impl HeadNode {
             let mut interval = tokio::time::interval(timeout);
             loop {
                 interval.tick().await;
-                
+
                 if *state.read().await == HeadNodeState::ShuttingDown {
                     break;
                 }
 
                 let mut workers = workers.write().await;
-                let now = Instant::now();
                 let mut to_remove = Vec::new();
 
-                for (worker_id, info) in workers.iter() {
-                    if now.duration_since(info.last_heartbeat) >= timeout {
+                for (worker_id, worker) in workers.iter() {
+                    if worker.last_heartbeat.elapsed() > timeout {
                         to_remove.push(*worker_id);
                     }
                 }
@@ -262,9 +284,7 @@ impl HeadNode {
                         NodeHealth::Unhealthy("Heartbeat timeout".to_string()),
                     ).await {
                         Ok(_) => {
-                            if let Err(e) = metrics.increment_counter("head.workers.timeout", 1) {
-                                error!("Failed to update metrics: {}", e);
-                            }
+                            metrics.increment_counter("head.workers.timeout", 1).await;
                         }
                         Err(e) => {
                             error!("Failed to update node health: {}", e);
@@ -312,12 +332,8 @@ impl HeadNode {
                     let avg_cpu = total_cpu / active_workers as f64;
                     let avg_memory = total_memory / active_workers;
 
-                    if let Err(e) = metrics.set_gauge("head.cluster.cpu_usage", avg_cpu) {
-                        error!("Failed to update CPU metrics: {}", e);
-                    }
-                    if let Err(e) = metrics.set_gauge("head.cluster.memory_usage", avg_memory as f64) {
-                        error!("Failed to update memory metrics: {}", e);
-                    }
+                    metrics.set_gauge("head.cluster.cpu_usage", avg_cpu).await;
+                    metrics.set_gauge("head.cluster.memory_usage", avg_memory as f64).await;
                 }
             }
         });
@@ -352,9 +368,7 @@ impl HeadNode {
                     match load_balancer.select_node(&task).await {
                         Ok(Some(_worker_id)) => {
                             // TODO: Implement task dispatch logic
-                            if let Err(e) = metrics.increment_counter("head.tasks.scheduled", 1) {
-                                error!("Failed to update metrics: {}", e);
-                            }
+                            metrics.increment_counter("head.tasks.scheduled", 1).await;
                         }
                         Ok(None) => {
                             warn!("No available worker for task {}", task.task_id);
@@ -369,7 +383,7 @@ impl HeadNode {
             }
         });
 
-        self.scheduler_handle.write().await.replace(handle);
+        *self.scheduler_handle.write().await = Some(handle);
         Ok(())
     }
 

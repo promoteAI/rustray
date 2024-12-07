@@ -11,13 +11,14 @@ use tracing::{info, warn, error, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use rustray::{
-    proto::rust_ray_server::RustRayServer,
+    proto::rustray_server::RustrayServer,
     grpc::RustRayService,
     head::{HeadNode, HeadNodeConfig},
     worker::WorkerNode,
     error::Result,
     common::object_store::ObjectStore,
     metrics::MetricsCollector,
+    scheduler::LoadBalanceStrategy,
 };
 
 mod api;
@@ -146,118 +147,87 @@ async fn shutdown_signal() {
 /// Main application entry point
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Parse command-line arguments
+    let _subscriber = FmtSubscriber::builder()
+        .with_max_level(Level::INFO)
+        .init();
+
     let args = Args::parse();
+    let port = args.port;
+    let grpc_addr = format!("0.0.0.0:{}", port).parse().unwrap();
 
-    // Setup logging
-    setup_logging(&args.log_level)?;
-
-    // Configure server address
-    let addr: SocketAddr = format!("0.0.0.0:{}", args.port)
-        .parse()
-        .map_err(|e| anyhow::anyhow!("Invalid address: {}", e))?;
-
-    // Spawn shutdown signal handler
-    let shutdown_handle = tokio::spawn(shutdown_signal());
+    // 创建关闭通道
+    let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
+    
+    // 监听 Ctrl+C 信号
+    tokio::spawn(async move {
+        match signal::ctrl_c().await {
+            Ok(()) => {
+                info!("Received Ctrl+C, initiating shutdown...");
+                shutdown_tx.send(()).await.ok();
+            }
+            Err(err) => {
+                error!("Failed to listen for Ctrl+C: {}", err);
+            }
+        }
+    });
 
     match args.node_type {
         NodeType::Head => {
-            info!("Starting head node on {}", addr);
+            info!("Starting head node on port {}", port);
             
-            // Create shared components
-            let object_store = Arc::new(ObjectStore::new("default".to_string()));
-            let metrics = Arc::new(MetricsCollector::new());
-            let (status_tx, _status_rx) = mpsc::channel(100);
-
-            // Create head node configuration
             let config = HeadNodeConfig {
-                address: addr.ip().to_string(),
-                port: addr.port(),
+                address: "0.0.0.0".to_string(),
+                port,
                 heartbeat_timeout: Duration::from_secs(30),
                 resource_monitor_interval: Duration::from_secs(10),
-                scheduling_strategy: rustray::scheduler::LoadBalanceStrategy::RoundRobin,
+                scheduling_strategy: LoadBalanceStrategy::RoundRobin,
             };
 
-            // Create head node
-            let head = HeadNode::new(
-                config,
-                object_store,
-                metrics.clone(),
-                status_tx,
-            );
+            let object_store = Arc::new(ObjectStore::new("default".to_string()));
+            let metrics = Arc::new(MetricsCollector::new());
+            let (status_tx, _) = mpsc::channel(100);
 
-            // Create worker node for local tasks
+            let head = HeadNode::new(config, object_store, metrics.clone(), status_tx);
+            head.start().await?;
+
             let worker = Arc::new(WorkerNode::new(
-                addr.ip().to_string(),
-                addr.port(),
+                "0.0.0.0".to_string(),
+                port,
                 metrics.clone(),
             ));
 
-            // Create API routes
-            let app = create_api_routes(metrics.clone(), worker.clone());
-
-            // Create gRPC service
             let service = RustRayService::new(head, worker);
             
-            // Start both HTTP and gRPC servers
-            let grpc_addr = SocketAddr::new(addr.ip(), addr.port() + 1);
-            
-            // Run HTTP and gRPC servers concurrently
-            tokio::select! {
-                res = axum::Server::bind(&addr)
-                    .serve(app.into_make_service()) => {
-                    if let Err(e) = res {
-                        error!("HTTP server error: {}", e);
-                        return Err(e.into());
-                    }
-                }
-                res = Server::builder()
-                    .add_service(RustRayServer::new(service))
-                    .serve_with_shutdown(grpc_addr, async {
-                        shutdown_handle.await.ok();
-                    }) => {
-                    if let Err(e) = res {
-                        error!("gRPC server error: {}", e);
-                        return Err(e.into());
-                    }
-                }
-                _ = shutdown_handle => {
-                    info!("Shutdown signal received");
-                }
-            }
+            info!("gRPC server listening on {}", grpc_addr);
+            Server::builder()
+                .add_service(RustrayServer::new(service))
+                .serve_with_shutdown(grpc_addr, async {
+                    shutdown_rx.recv().await;
+                })
+                .await?;
         }
         NodeType::Worker => {
-            info!("Starting worker node on {} (head: {})", addr, args.head_addr);
+            info!("Starting worker node on port {}", port);
             
-            // Create metrics collector
             let metrics = Arc::new(MetricsCollector::new());
-
-            // Create worker node
             let worker = Arc::new(WorkerNode::new(
-                addr.ip().to_string(),
-                addr.port(),
+                "0.0.0.0".to_string(),
+                port,
                 metrics.clone(),
             ));
 
-            // Create API routes
-            let app = create_api_routes(metrics.clone(), worker.clone());
-
-            // Start HTTP server
-            tokio::select! {
-                res = axum::Server::bind(&addr)
-                    .serve(app.into_make_service()) => {
-                    if let Err(e) = res {
-                        error!("HTTP server error: {}", e);
-                        return Err(e.into());
-                    }
-                }
-                _ = shutdown_handle => {
-                    info!("Shutdown signal received");
-                }
-            }
+            let service = RustRayService::new(HeadNode::default(), worker);
+            
+            info!("gRPC server listening on {}", grpc_addr);
+            Server::builder()
+                .add_service(RustrayServer::new(service))
+                .serve_with_shutdown(grpc_addr, async {
+                    shutdown_rx.recv().await;
+                })
+                .await?;
         }
     }
 
-    info!("Node shutdown complete");
+    info!("Server shutdown complete");
     Ok(())
 } 

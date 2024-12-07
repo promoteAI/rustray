@@ -6,6 +6,7 @@ use uuid::Uuid;
 use serde::{Serialize, Deserialize};
 use sysinfo::{System, SystemExt, CpuExt, DiskExt, NetworkExt};
 use crate::metrics::MetricsCollector;
+use crate::error::Result;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemMetricsResponse {
@@ -46,18 +47,11 @@ pub struct StorageMetricsResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Task {
+pub struct RunningTask {
     pub id: String,
     pub status: String,
     pub progress: f32,
     pub created_at: String,
-}
-
-#[derive(Debug)]
-struct RunningTask {
-    status: String,
-    progress: f32,
-    created_at: SystemTime,
 }
 
 #[derive(Debug)]
@@ -90,20 +84,9 @@ impl WorkerNode {
         self.start_time.elapsed().as_secs()
     }
 
-    pub async fn get_running_tasks(&self) -> Vec<Task> {
-        let running_tasks = self.running_tasks.read().await;
-        running_tasks
-            .iter()
-            .map(|(id, task)| Task {
-                id: id.clone(),
-                status: task.status.clone(),
-                progress: task.progress,
-                created_at: task.created_at.duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs()
-                    .to_string(),
-            })
-            .collect()
+    pub async fn get_running_tasks(&self) -> Vec<RunningTask> {
+        let tasks = self.running_tasks.read().await;
+        tasks.values().cloned().collect()
     }
 
     pub async fn get_running_tasks_count(&self) -> usize {
@@ -230,5 +213,10 @@ impl WorkerNode {
             network,
             storage,
         }
+    }
+
+    pub async fn start(&self) -> Result<()> {
+        // 实现启动逻辑
+        Ok(())
     }
 }
