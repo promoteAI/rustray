@@ -7,7 +7,8 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
 import * as echarts from 'echarts'
-import axios from 'axios'
+import axios from '../../utils/axios'
+import { API_ROUTES } from '../../config/api'
 
 const chartRef = ref<HTMLDivElement | null>(null)
 let chart: echarts.ECharts | null = null
@@ -73,7 +74,7 @@ const initChart = () => {
 
 const updateChartData = async () => {
   try {
-    const response = await axios.get('/api/metrics/storage')
+    const response = await axios.get(API_ROUTES.METRICS.STORAGE)
     const { total, used, free } = response.data
     
     chart?.setOption({
@@ -85,17 +86,36 @@ const updateChartData = async () => {
       }]
     })
   } catch (error) {
-    console.error('存储指标获取失败', error)
+    console.error('存储指标获取失败:', error)
   }
 }
 
+// 监听窗口大小变化
+const handleResize = () => {
+  chart?.resize()
+}
+
+// 提供刷新方法给父组件
+const refresh = () => {
+  return updateChartData()
+}
+
+window.addEventListener('resize', handleResize)
+
 onMounted(() => {
   initChart()
+  updateChartData()
   const timer = setInterval(updateChartData, 5000)
+  
   onUnmounted(() => {
     clearInterval(timer)
+    window.removeEventListener('resize', handleResize)
     chart?.dispose()
   })
+})
+
+defineExpose({
+  refresh
 })
 </script>
 

@@ -26,7 +26,8 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
 import * as echarts from 'echarts'
-import axios from 'axios'
+import axios from '../../utils/axios'
+import { API_ROUTES } from '../../config/api'
 
 const chartRef = ref<HTMLDivElement | null>(null)
 let chart: echarts.ECharts | null = null
@@ -156,7 +157,7 @@ const initChart = () => {
 
 const updateChartData = async () => {
   try {
-    const response = await axios.get('/api/metrics/cpu')
+    const response = await axios.get(API_ROUTES.METRICS.CPU)
     const { usage, cores: cpuCores } = response.data
     cores.value = cpuCores
 
@@ -199,7 +200,10 @@ const updateChartData = async () => {
       ]
     })
   } catch (error) {
-    console.error('CPU指标获取失败', error)
+    console.error('CPU指标获取失败:', error)
+    // 添加错误处理UI反馈
+    cores.value = 0
+    avgUsage.value = '0.00'
   }
 }
 
@@ -208,7 +212,7 @@ const handleResize = () => {
   chart?.resize()
 }
 
-// 提供刷���方法给父组件
+// 提供刷新方法给父组件
 const refresh = () => {
   return updateChartData()
 }
