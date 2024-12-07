@@ -196,9 +196,23 @@ async fn main() -> Result<()> {
                 metrics.clone(),
             ));
 
-            let service = RustRayService::new(head, worker);
+            let service = RustRayService::new(head, worker.clone());
             
             info!("gRPC server listening on {}", grpc_addr);
+
+            // 启动 API 路由
+            let api_routes = create_api_routes(metrics.clone(), worker.clone());
+            let api_addr = format!("0.0.0.0:{}", port + 1).parse().unwrap();
+            
+            tokio::spawn(async move {
+                info!("API 服务器启动于 {}", api_addr);
+                axum::Server::bind(&api_addr)
+                    .serve(api_routes.into_make_service())
+                    .await
+                    .expect("API 服务器启动失败");
+            });
+
+            // 等待 gRPC 服务器关闭
             Server::builder()
                 .add_service(RustrayServer::new(service))
                 .serve_with_shutdown(grpc_addr, async {
