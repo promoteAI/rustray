@@ -6,15 +6,10 @@
     "jsx": "preserve",
     "importHelpers": true,
     "moduleResolution": "node",
-    "experimentalDecorators": true,
-    "skipLibCheck": true,
     "esModuleInterop": true,
     "allowSyntheticDefaultImports": true,
     "sourceMap": true,
     "baseUrl": ".",
-    "types": [
-      "webpack-env"
-    ],
     "paths": {
       "@/*": [
         "src/*"
@@ -25,6 +20,10 @@
       "dom",
       "dom.iterable",
       "scripthost"
+    ],
+    "types": [
+      "vue",
+      "vite/client"
     ]
   },
   "include": [
@@ -32,7 +31,8 @@
     "src/**/*.tsx",
     "src/**/*.vue",
     "tests/**/*.ts",
-    "tests/**/*.tsx"
+    "tests/**/*.tsx",
+    "env.d.ts"
   ],
   "exclude": [
     "node_modules"
