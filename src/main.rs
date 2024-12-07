@@ -164,6 +164,11 @@ async fn main() -> Result<()> {
         NodeType::Head => {
             info!("Starting head node on {}", addr);
             
+            // Create shared components
+            let object_store = Arc::new(ObjectStore::new("default".to_string()));
+            let metrics = Arc::new(MetricsCollector::new());
+            let (status_tx, _status_rx) = mpsc::channel(100);
+
             // Create head node configuration
             let config = HeadNodeConfig {
                 address: addr.ip().to_string(),
@@ -172,11 +177,6 @@ async fn main() -> Result<()> {
                 resource_monitor_interval: Duration::from_secs(10),
                 scheduling_strategy: rustray::scheduler::LoadBalanceStrategy::RoundRobin,
             };
-
-            // Create shared components
-            let object_store = Arc::new(ObjectStore::new("default".to_string()));
-            let metrics = Arc::new(MetricsCollector::new("head".to_string()));
-            let (status_tx, _status_rx) = mpsc::channel(100);
 
             // Create head node
             let head = HeadNode::new(
@@ -187,53 +187,72 @@ async fn main() -> Result<()> {
             );
 
             // Create worker node for local tasks
-            let worker = WorkerNode::new(
+            let worker = Arc::new(WorkerNode::new(
                 addr.ip().to_string(),
                 addr.port(),
-                metrics,
-            );
+                metrics.clone(),
+            ));
+
+            // Create API routes
+            let app = create_api_routes(metrics.clone(), worker.clone());
 
             // Create gRPC service
             let service = RustRayService::new(head, worker);
             
-            let server = Server::builder()
-                .add_service(RustRayServer::new(service))
-                .serve_with_shutdown(addr, async {
-                    shutdown_handle.await.ok();
-                });
-
-            info!("Head node server started successfully");
+            // Start both HTTP and gRPC servers
+            let grpc_addr = SocketAddr::new(addr.ip(), addr.port() + 1);
             
-            if let Err(e) = server.await {
-                error!("Head node server error: {}", e);
-                return Err(e.into());
+            // Run HTTP and gRPC servers concurrently
+            tokio::select! {
+                res = axum::Server::bind(&addr)
+                    .serve(app.into_make_service()) => {
+                    if let Err(e) = res {
+                        error!("HTTP server error: {}", e);
+                        return Err(e.into());
+                    }
+                }
+                res = Server::builder()
+                    .add_service(RustRayServer::new(service))
+                    .serve_with_shutdown(grpc_addr, async {
+                        shutdown_handle.await.ok();
+                    }) => {
+                    if let Err(e) = res {
+                        error!("gRPC server error: {}", e);
+                        return Err(e.into());
+                    }
+                }
+                _ = shutdown_handle => {
+                    info!("Shutdown signal received");
+                }
             }
         }
         NodeType::Worker => {
             info!("Starting worker node on {} (head: {})", addr, args.head_addr);
             
             // Create metrics collector
-            let metrics = Arc::new(MetricsCollector::new("worker".to_string()));
+            let metrics = Arc::new(MetricsCollector::new());
 
             // Create worker node
-            let worker = WorkerNode::new(
+            let worker = Arc::new(WorkerNode::new(
                 addr.ip().to_string(),
                 addr.port(),
-                metrics,
-            );
-            
+                metrics.clone(),
+            ));
+
+            // Create API routes
+            let app = create_api_routes(metrics.clone(), worker.clone());
+
+            // Start HTTP server
             tokio::select! {
-                result = worker.connect_to_head(&args.head_addr) => {
-                    match result {
-                        Ok(_) => info!("Successfully connected to head node"),
-                        Err(e) => {
-                            error!("Failed to connect to head node: {}", e);
-                            return Err(e);
-                        }
+                res = axum::Server::bind(&addr)
+                    .serve(app.into_make_service()) => {
+                    if let Err(e) = res {
+                        error!("HTTP server error: {}", e);
+                        return Err(e.into());
                     }
                 }
                 _ = shutdown_handle => {
-                    info!("Shutdown signal received before connection");
+                    info!("Shutdown signal received");
                 }
             }
         }

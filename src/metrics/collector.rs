@@ -1,108 +1,108 @@
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::Mutex;
 use std::time::Instant;
-use crate::error::Result;
-use tracing::warn;
-use crate::worker::{SystemMetricsResponse};
+use crate::worker::SystemMetricsResponse;
+use crate::error::{Result, RustRayError};
 
-/// Metrics collector for system monitoring
+#[derive(Debug)]
 pub struct MetricsCollector {
-    name: String,
-    counters: RwLock<HashMap<String, i64>>,
-    gauges: RwLock<HashMap<String, f64>>,
-    histograms: RwLock<HashMap<String, Vec<f64>>>,
-    timers: RwLock<HashMap<String, Instant>>,
+    counters: Mutex<HashMap<String, i64>>,
+    gauges: Mutex<HashMap<String, f64>>,
+    histograms: Mutex<HashMap<String, Vec<f64>>>,
+    timers: Mutex<HashMap<String, Instant>>,
 }
 
 impl MetricsCollector {
-    /// Create a new metrics collector
-    pub fn new(name: String) -> Self {
+    pub fn new() -> Self {
         Self {
-            name,
-            counters: RwLock::new(HashMap::new()),
-            gauges: RwLock::new(HashMap::new()),
-            histograms: RwLock::new(HashMap::new()),
-            timers: RwLock::new(HashMap::new()),
+            counters: Mutex::new(HashMap::new()),
+            gauges: Mutex::new(HashMap::new()),
+            histograms: Mutex::new(HashMap::new()),
+            timers: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Increment a counter by the given value
-    pub async fn increment_counter(&self, key: &str, value: i64) -> Result<(), String> {
-        let mut counters = self.counters.write().unwrap();
-        let counter = counters.entry(key.to_string()).or_insert(0);
-        *counter += value;
+    pub fn increment_counter(&self, key: &str, value: i64) -> Result<()> {
+        let mut counters = self.counters.lock()
+            .map_err(|e| RustRayError::InternalError(format!("Failed to lock counters: {}", e)))?;
+        *counters.entry(key.to_string()).or_insert(0) += value;
         Ok(())
     }
 
-    /// Set a gauge value
-    pub async fn set_gauge(&self, key: &str, value: f64) -> Result<(), String> {
-        let mut gauges = self.gauges.write().unwrap();
+    pub fn set_gauge(&self, key: &str, value: f64) -> Result<()> {
+        let mut gauges = self.gauges.lock()
+            .map_err(|e| RustRayError::InternalError(format!("Failed to lock gauges: {}", e)))?;
         gauges.insert(key.to_string(), value);
         Ok(())
     }
 
-    /// Record a value in a histogram
-    pub async fn record_histogram(&self, key: &str, value: f64) -> Result<(), String> {
-        let mut histograms = self.histograms.write().unwrap();
-        let histogram = histograms.entry(key.to_string()).or_insert_with(Vec::new);
-        histogram.push(value);
+    pub fn record_histogram(&self, key: &str, value: f64) -> Result<()> {
+        let mut histograms = self.histograms.lock()
+            .map_err(|e| RustRayError::InternalError(format!("Failed to lock histograms: {}", e)))?;
+        histograms.entry(key.to_string()).or_insert_with(Vec::new).push(value);
         Ok(())
     }
 
-    /// Start a timer
-    pub async fn start_timer(&self, key: &str) -> Result<(), String> {
-        let mut timers = self.timers.write().unwrap();
+    pub fn start_timer(&self, key: &str) -> Result<()> {
+        let mut timers = self.timers.lock()
+            .map_err(|e| RustRayError::InternalError(format!("Failed to lock timers: {}", e)))?;
         timers.insert(key.to_string(), Instant::now());
         Ok(())
     }
 
-    /// Stop a timer and record the duration
-    pub async fn stop_timer(&self, key: &str) -> Result<f64, String> {
-        let mut timers = self.timers.write().unwrap();
+    pub fn stop_timer(&self, key: &str) -> Result<f64> {
+        let mut timers = self.timers.lock()
+            .map_err(|e| RustRayError::InternalError(format!("Failed to lock timers: {}", e)))?;
         if let Some(start_time) = timers.remove(key) {
-            let duration = start_time.elapsed();
-            let duration_secs = duration.as_secs_f64();
-            self.record_histogram(key, duration_secs).await?;
-            Ok(duration_secs)
+            Ok(start_time.elapsed().as_secs_f64())
         } else {
-            Err("Timer not found".to_string())
+            Err(RustRayError::InternalError(format!("Timer {} not found", key)))
         }
     }
 
-    /// Get a counter value
-    pub fn get_counter(&self, key: &str) -> Option<i64> {
-        let counters = self.counters.read().unwrap();
-        counters.get(key).copied()
+    pub fn get_counter(&self, key: &str) -> Result<i64> {
+        let counters = self.counters.lock()
+            .map_err(|e| RustRayError::InternalError(format!("Failed to lock counters: {}", e)))?;
+        Ok(*counters.get(key).unwrap_or(&0))
     }
 
-    /// Get a gauge value
-    pub fn get_gauge(&self, key: &str) -> Option<f64> {
-        let gauges = self.gauges.read().unwrap();
-        gauges.get(key).copied()
+    pub fn get_gauge(&self, key: &str) -> Result<f64> {
+        let gauges = self.gauges.lock()
+            .map_err(|e| RustRayError::InternalError(format!("Failed to lock gauges: {}", e)))?;
+        Ok(*gauges.get(key).unwrap_or(&0.0))
     }
 
-    /// Get histogram values
-    pub fn get_histogram(&self, key: &str) -> Option<Vec<f64>> {
-        let histograms = self.histograms.read().unwrap();
-        histograms.get(key).cloned()
+    pub fn get_histogram(&self, key: &str) -> Result<Vec<f64>> {
+        let histograms = self.histograms.lock()
+            .map_err(|e| RustRayError::InternalError(format!("Failed to lock histograms: {}", e)))?;
+        Ok(histograms.get(key).cloned().unwrap_or_default())
     }
 
-    /// Reset all metrics
-    pub fn reset(&self) {
-        self.counters.write().unwrap().clear();
-        self.gauges.write().unwrap().clear();
-        self.histograms.write().unwrap().clear();
-        self.timers.write().unwrap().clear();
-    }
+    pub fn record_system_metrics(&self, metrics: &SystemMetricsResponse) -> Result<()> {
+        // Record CPU metrics
+        for (i, usage) in metrics.cpu.usage.iter().enumerate() {
+            self.set_gauge(&format!("system.cpu.core_{}.usage", i), *usage)?;
+        }
+        self.set_gauge("system.cpu.cores", metrics.cpu.cores as f64)?;
 
-    pub async fn record_system_metrics(&self, metrics: &SystemMetricsResponse) -> Result<(), String> {
-        // 记录系统级别指标
-        self.set_gauge("system.cpu.usage", metrics.cpu.usage.iter().sum::<f64>() / metrics.cpu.usage.len() as f64).await?;
-        
-        self.set_gauge("system.memory.usage_percentage", metrics.memory.usage_percentage).await?;
-        
-        self.set_gauge("system.network.bytes_sent", metrics.network.bytes_sent as f64).await?;
-        
+        // Record memory metrics
+        self.set_gauge("system.memory.total", metrics.memory.total as f64)?;
+        self.set_gauge("system.memory.used", metrics.memory.used as f64)?;
+        self.set_gauge("system.memory.free", metrics.memory.free as f64)?;
+        self.set_gauge("system.memory.usage_percentage", metrics.memory.usage_percentage)?;
+
+        // Record network metrics
+        self.set_gauge("system.network.bytes_sent", metrics.network.bytes_sent as f64)?;
+        self.set_gauge("system.network.bytes_recv", metrics.network.bytes_recv as f64)?;
+        self.set_gauge("system.network.packets_sent", metrics.network.packets_sent as f64)?;
+        self.set_gauge("system.network.packets_recv", metrics.network.packets_recv as f64)?;
+
+        // Record storage metrics
+        self.set_gauge("system.storage.total", metrics.storage.total as f64)?;
+        self.set_gauge("system.storage.used", metrics.storage.used as f64)?;
+        self.set_gauge("system.storage.free", metrics.storage.free as f64)?;
+        self.set_gauge("system.storage.usage_percentage", metrics.storage.usage_percentage)?;
+
         Ok(())
     }
-} 
+}

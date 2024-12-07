@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
+use tracing::error;
 
 use crate::common::{NodeInfo, TaskSpec};
 use crate::error::Result;
@@ -87,8 +88,9 @@ impl LoadBalancer {
         };
 
         if selected.is_some() {
-            self.metrics.increment_counter("load_balancer.tasks_assigned", 1).await
-                .map_err(|e| anyhow::anyhow!("Failed to update metrics: {}", e))?;
+            if let Err(e) = self.metrics.increment_counter("scheduler.tasks.assigned", 1) {
+                error!("Failed to update metrics: {}", e);
+            }
         }
 
         Ok(selected)

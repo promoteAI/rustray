@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, RwLock};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::common::{
@@ -67,6 +67,7 @@ pub struct HeadNode {
     metrics: Arc<MetricsCollector>,
     status_tx: mpsc::Sender<ClusterStatus>,
     background_tasks: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>>,
+    scheduler_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 /// Worker node information
@@ -109,6 +110,7 @@ impl HeadNode {
             metrics,
             status_tx,
             background_tasks: Arc::new(RwLock::new(Vec::new())),
+            scheduler_handle: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -159,9 +161,7 @@ impl HeadNode {
         self.load_balancer.register_node(worker).await
             .map_err(|e| RustRayError::InternalError(e.to_string()))?;
 
-        let metrics = &*self.metrics;
-        metrics.increment_counter("head.workers.registered", 1).await
-            .map_err(|e| RustRayError::InternalError(e.to_string()))?;
+        self.metrics.increment_counter("head.workers.registered", 1)?;
 
         self.update_status().await?;
         info!("Worker node registered successfully");
@@ -180,9 +180,7 @@ impl HeadNode {
             if let Some(_worker) = workers.get(&worker_id) {
                 // TODO: Implement task sending logic
                 
-                let metrics = &*self.metrics;
-                metrics.increment_counter("head.tasks.submitted", 1).await
-                    .map_err(|e| RustRayError::InternalError(e.to_string()))?;
+                self.metrics.increment_counter("head.tasks.submitted", 1)?;
             }
         }
 
@@ -204,8 +202,7 @@ impl HeadNode {
                 .await
                 .map_err(|e| RustRayError::InternalError(e.to_string()))?;
 
-            self.metrics.increment_counter("head.heartbeats.received", 1).await
-                .map_err(|e| RustRayError::InternalError(e.to_string()))?;
+            self.metrics.increment_counter("head.heartbeats.received", 1)?;
         }
 
         self.update_status().await?;
@@ -265,7 +262,7 @@ impl HeadNode {
                         NodeHealth::Unhealthy("Heartbeat timeout".to_string()),
                     ).await {
                         Ok(_) => {
-                            if let Err(e) = metrics.increment_counter("head.workers.timeout", 1).await {
+                            if let Err(e) = metrics.increment_counter("head.workers.timeout", 1) {
                                 error!("Failed to update metrics: {}", e);
                             }
                         }
@@ -315,10 +312,10 @@ impl HeadNode {
                     let avg_cpu = total_cpu / active_workers as f64;
                     let avg_memory = total_memory / active_workers;
 
-                    if let Err(e) = metrics.set_gauge("head.cluster.cpu_usage", avg_cpu).await {
+                    if let Err(e) = metrics.set_gauge("head.cluster.cpu_usage", avg_cpu) {
                         error!("Failed to update CPU metrics: {}", e);
                     }
-                    if let Err(e) = metrics.set_gauge("head.cluster.memory_usage", avg_memory as f64).await {
+                    if let Err(e) = metrics.set_gauge("head.cluster.memory_usage", avg_memory as f64) {
                         error!("Failed to update memory metrics: {}", e);
                     }
                 }
@@ -341,28 +338,30 @@ impl HeadNode {
                     break;
                 }
 
-                // Get next ready task
-                match task_graph.get_ready_tasks().await {
-                    Ok(ready_tasks) => {
-                        for task in ready_tasks {
-                            match load_balancer.select_node(&task).await {
-                                Ok(Some(_worker_id)) => {
-                                    // TODO: Implement task dispatch logic
-                                    if let Err(e) = metrics.increment_counter("head.tasks.scheduled", 1).await {
-                                        error!("Failed to update metrics: {}", e);
-                                    }
-                                }
-                                Ok(None) => {
-                                    info!("No available worker for task {}", task.task_id);
-                                }
-                                Err(e) => {
-                                    error!("Failed to select node for task {}: {}", task.task_id, e);
-                                }
-                            }
-                        }
-                    }
+                // Get ready tasks from task graph
+                let ready_tasks = match task_graph.get_ready_tasks().await {
+                    Ok(tasks) => tasks,
                     Err(e) => {
                         error!("Failed to get ready tasks: {}", e);
+                        continue;
+                    }
+                };
+
+                for task in ready_tasks {
+                    // Try to assign task to a worker
+                    match load_balancer.select_node(&task).await {
+                        Ok(Some(_worker_id)) => {
+                            // TODO: Implement task dispatch logic
+                            if let Err(e) = metrics.increment_counter("head.tasks.scheduled", 1) {
+                                error!("Failed to update metrics: {}", e);
+                            }
+                        }
+                        Ok(None) => {
+                            warn!("No available worker for task {}", task.task_id);
+                        }
+                        Err(e) => {
+                            error!("Failed to select worker for task {}: {}", task.task_id, e);
+                        }
                     }
                 }
 
@@ -370,7 +369,7 @@ impl HeadNode {
             }
         });
 
-        self.background_tasks.write().await.push(handle);
+        self.scheduler_handle.write().await.replace(handle);
         Ok(())
     }
 

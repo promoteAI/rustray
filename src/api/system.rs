@@ -7,7 +7,6 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
-use rustray::worker::SystemMetricsResponse;
 use crate::AppState;
 
 // 系统概览响应结构体
@@ -48,29 +47,11 @@ pub async fn get_system_overview(
 
 // 获取系统指标
 pub async fn get_system_metrics(
-    State(state): State<AppState>
-) -> Result<Json<SystemMetricsResponse>, (StatusCode, String)> {
+    State(state): State<AppState>,
+) -> impl IntoResponse {
     let worker = state.worker.clone();
-    
-    match worker.get_cached_metrics() {
-        Some(cached_metrics) => Ok(Json(cached_metrics)),
-        None => {
-            match worker.update_cached_metrics().await {
-                Ok(_) => {
-                    worker.get_cached_metrics()
-                        .map(Json)
-                        .ok_or_else(|| {
-                            error!("Failed to retrieve system metrics after update");
-                            (StatusCode::INTERNAL_SERVER_ERROR, "Metrics retrieval failed".to_string())
-                        })
-                },
-                Err(e) => {
-                    error!("Error updating system metrics: {:?}", e);
-                    Err((StatusCode::INTERNAL_SERVER_ERROR, "Metrics update failed".to_string()))
-                }
-            }
-        }
-    }
+    let metrics = worker.get_system_metrics().await;
+    (StatusCode::OK, Json(metrics))
 }
 
 // 获取 CPU 指标
@@ -158,9 +139,10 @@ pub async fn get_task_status(
         }
     }).collect();
 
+    let total_count = task_infos.len();
     let response = TaskStatusResponse {
         tasks: task_infos,
-        total_count: task_infos.len(),
+        total_count,
     };
 
     (StatusCode::OK, Json(response))
