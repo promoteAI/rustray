@@ -35,14 +35,7 @@ panic = 'abort'
 
 [dependencies]
 # Async runtime
-tokio = { version = "1.32", features = [
-    "rt", 
-    "rt-multi-thread", 
-    "sync", 
-    "time", 
-    "macros", 
-    "signal"
-] }
+tokio = { version = "1", features = ["full"] }
 
 # Futures utilities
 futures-util = "0.3"
@@ -78,6 +71,12 @@ http = "0.2"
 
 # Random number generation
 rand = { version = "0.8", features = ["std"] }
+
+# CPU metrics
+num_cpus = "1.13"
+
+# Web framework
+axum = "0.6"
 
 [build-dependencies]
 tonic-build = "0.9"

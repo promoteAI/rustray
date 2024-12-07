@@ -20,6 +20,37 @@ use rustray::{
     metrics::MetricsCollector,
 };
 
+mod api;
+
+use axum::{
+    routing::get,
+    Router,
+};
+
+struct AppState {
+    metrics: Arc<MetricsCollector>,
+    worker: Arc<WorkerNode>,
+}
+
+fn create_api_routes(
+    metrics: Arc<MetricsCollector>,
+    worker: Arc<WorkerNode>,
+) -> Router {
+    let app_state = AppState {
+        metrics: metrics.clone(),
+        worker: worker.clone(),
+    };
+
+    Router::new()
+        .route("/api/system/overview", get(api::system::get_system_overview))
+        .route("/api/system/metrics", get(api::system::get_system_metrics))
+        .route("/api/metrics/cpu", get(api::system::get_cpu_metrics))
+        .route("/api/metrics/memory", get(api::system::get_memory_metrics))
+        .route("/api/metrics/network", get(api::system::get_network_metrics))
+        .route("/api/metrics/storage", get(api::system::get_storage_metrics))
+        .with_state(app_state)
+}
+
 /// Command-line arguments for RustRay nodes
 #[derive(Parser, Debug)]
 #[command(
