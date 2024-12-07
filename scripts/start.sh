@@ -19,6 +19,7 @@ case $1 in
         RUST_LOG=info cargo run --release -- --node-type head --port $HEAD_PORT > logs/head.log 2>&1 &
         echo $! > logs/head.pid
         echo "Head node started (PID: $(cat logs/head.pid))"
+        echo "Head API service running on port $((HEAD_PORT + 1))"
         ;;
         
     "worker")
@@ -26,6 +27,7 @@ case $1 in
         RUST_LOG=info cargo run --release -- --node-type worker --port $WORKER_PORT --head-addr "127.0.0.1:$HEAD_PORT" > logs/worker_$WORKER_PORT.log 2>&1 &
         echo $! > logs/worker_$WORKER_PORT.pid
         echo "Worker node started (PID: $(cat logs/worker_$WORKER_PORT.pid))"
+        echo "Worker API service running on port $((WORKER_PORT + 1))"
         ;;
         
     *)
