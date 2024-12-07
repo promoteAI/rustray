@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Instant, SystemTime};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 use serde::{Serialize, Deserialize};
@@ -8,43 +8,8 @@ use sysinfo::{System, SystemExt, CpuExt, DiskExt, NetworkExt};
 use crate::metrics::MetricsCollector;
 use crate::error::Result;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SystemMetricsResponse {
-    pub cpu: CPUMetricsResponse,
-    pub memory: MemoryMetricsResponse,
-    pub network: NetworkMetricsResponse,
-    pub storage: StorageMetricsResponse,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CPUMetricsResponse {
-    pub usage: Vec<f64>,
-    pub cores: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MemoryMetricsResponse {
-    pub total: u64,
-    pub used: u64,
-    pub free: u64,
-    pub usage_percentage: f64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NetworkMetricsResponse {
-    pub bytes_sent: u64,
-    pub bytes_recv: u64,
-    pub packets_sent: u64,
-    pub packets_recv: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StorageMetricsResponse {
-    pub total: u64,
-    pub used: u64,
-    pub free: u64,
-    pub usage_percentage: f64,
-}
+pub mod metrics;
+use metrics::{SystemMetricsResponse, CPUMetricsResponse, MemoryMetricsResponse, NetworkMetricsResponse, StorageMetricsResponse};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunningTask {
@@ -109,10 +74,15 @@ impl WorkerNode {
         let mut tasks = self.running_tasks.write().await;
         for i in 1..=5 {
             let task_id = format!("task-{}", i);
-            tasks.insert(task_id, RunningTask {
+            tasks.insert(task_id.clone(), RunningTask {
+                id: task_id,
                 status: "running".to_string(),
                 progress: (i as f32) * 20.0,
-                created_at: SystemTime::now(),
+                created_at: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+                    .to_string(),
             });
         }
     }

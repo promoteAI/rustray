@@ -2,7 +2,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
-use tracing::error;
 
 use crate::common::{TaskSpec, TaskStatus};
 use crate::error::{Result, RustRayError};
