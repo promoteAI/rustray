@@ -27,10 +27,14 @@ use axum::{
     Router,
 };
 
+#[derive(Clone)]
 struct AppState {
     metrics: Arc<MetricsCollector>,
     worker: Arc<WorkerNode>,
 }
+
+unsafe impl Send for AppState {}
+unsafe impl Sync for AppState {}
 
 fn create_api_routes(
     metrics: Arc<MetricsCollector>,

@@ -5,11 +5,9 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use tracing::error;
 
-use rustray::metrics::MetricsCollector;
-use rustray::worker::{WorkerNode, SystemMetricsResponse};
+use rustray::worker::SystemMetricsResponse;
 use crate::AppState;
 
 // 系统概览响应结构体
@@ -22,9 +20,9 @@ pub struct SystemOverviewResponse {
 
 // 获取系统概览
 pub async fn get_system_overview(
-    State(metrics): State<Arc<MetricsCollector>>,
-    State(worker): State<Arc<WorkerNode>>,
+    State(state): State<AppState>,
 ) -> impl IntoResponse {
+    let worker = state.worker.clone();
     let node_count = worker.get_cluster_node_count().await;
     let running_tasks = worker.get_running_tasks_count().await;
     let system_load = worker.get_system_load().await;
@@ -67,32 +65,36 @@ pub async fn get_system_metrics(
 
 // 获取 CPU 指标
 pub async fn get_cpu_metrics(
-    State(worker): State<Arc<WorkerNode>>,
+    State(state): State<AppState>,
 ) -> impl IntoResponse {
+    let worker = state.worker.clone();
     let cpu_metrics = worker.get_cpu_metrics().await;
     (StatusCode::OK, Json(cpu_metrics))
 }
 
 // 获取内存指标
 pub async fn get_memory_metrics(
-    State(worker): State<Arc<WorkerNode>>,
+    State(state): State<AppState>,
 ) -> impl IntoResponse {
+    let worker = state.worker.clone();
     let memory_metrics = worker.get_memory_metrics().await;
     (StatusCode::OK, Json(memory_metrics))
 }
 
 // 获取网络指标
 pub async fn get_network_metrics(
-    State(worker): State<Arc<WorkerNode>>,
+    State(state): State<AppState>,
 ) -> impl IntoResponse {
+    let worker = state.worker.clone();
     let network_metrics = worker.get_network_metrics().await;
     (StatusCode::OK, Json(network_metrics))
 }
 
 // 获取存储指标
 pub async fn get_storage_metrics(
-    State(worker): State<Arc<WorkerNode>>,
+    State(state): State<AppState>,
 ) -> impl IntoResponse {
+    let worker = state.worker.clone();
     let storage_metrics = worker.get_storage_metrics().await;
     (StatusCode::OK, Json(storage_metrics))
 }
