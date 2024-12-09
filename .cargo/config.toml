@@ -17,3 +17,12 @@ git-fetch-with-cli = true   # 使用系统 git 而不是内置的
 
 [registries.crates-io]
 protocol = "sparse"
+
+[source.crates-io]
+replace-with = 'mirror'
+
+[source.mirror]
+registry = "sparse+https://mirrors.aliyun.com/crates.io-index/"
+
+[registries.mirror]
+index = "https://mirrors.aliyun.com/crates.io-index/"
